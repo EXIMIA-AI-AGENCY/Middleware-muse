@@ -268,6 +268,9 @@ test('live checks: token, proxy REST/MCP like Muse, auth, permissions and speed'
 
   assert.equal(r.speed.samples, 5);
   assert.equal(typeof r.speed.differenceMs, 'number');
+  assert.equal(typeof r.speed.proxyOwnMs, 'number', 'proxy reports its own time on test calls');
+  assert.ok(r.speed.proxyOwnMs < 50, `own ${r.speed.proxyOwnMs} ms`);
+  assert.equal(typeof r.speed.ghlSpreadMs, 'number');
 
   // The checks' own calls never forward the internal marker or the proxy key to GHL.
   for (const seen of upstream.requests) {
@@ -281,6 +284,50 @@ test('live checks: token, proxy REST/MCP like Muse, auth, permissions and speed'
   assert.equal(o.metrics.recent.length, 0);
   assert.ok(o.metrics.checks.count >= 7);
   assert.ok(o.metrics.checks.overheadMs.p50 < 50, `overhead ${o.metrics.checks.overheadMs.p50} ms`);
+});
+
+test('panel test calls: never throttled by Muse\'s budget; overhead header only on them; marker same on every instance', async (t) => {
+  const { proxy } = await setup(t, { env: { RATE_LIMIT_MAX: '2', RATE_LIMIT_WINDOW_MS: '60000' } });
+  const { cookie } = await login(proxy);
+  const run = JSON.parse((await post(proxy, '/admin/api/checks', {}, { Cookie: cookie })).text);
+  assert.equal(run.checks.find((c) => c.id === 'proxy_rest').status, 'ok', 'checks not rate limited');
+  const normal = await request(`${proxy.url}/ghl/contacts/?locationId=${LOCATION}&limit=1`, { headers: { 'X-Proxy-Key': KEY } });
+  assert.equal(normal.status, 200);
+  assert.equal(normal.headers['x-proxy-overhead-ms'], undefined, 'Muse responses are not modified');
+  const forged = await request(`${proxy.url}/ghl/contacts/`, { headers: { 'X-Proxy-Key': KEY, 'X-Admin-Check': 'guess' } });
+  assert.equal(forged.headers['x-proxy-overhead-ms'], undefined);
+
+  const other = await startProxy(proxy.config.upstreamBase.origin, { ADMIN_PIN: PIN });
+  t.after(() => other.close());
+  const crypto = require('node:crypto');
+  const marker = crypto.createHmac('sha256', KEY).update('ghl-proxy admin check v1').digest('hex');
+  const res = await request(`${other.url}/ghl/contacts/`, { headers: { 'X-Proxy-Key': KEY, 'X-Admin-Check': marker } });
+  assert.ok(res.headers['x-proxy-overhead-ms'] !== undefined, 'another instance recognises the marker');
+});
+
+test('a call Muse abandons before GHL answers is recorded as cancelled (499), not 200', async (t) => {
+  const http = require('node:http');
+  const upstream = await startUpstream(() => {}); // never answers
+  const proxy = await startProxy(upstream.url, { ADMIN_PIN: PIN, UPSTREAM_TIMEOUT_MS: '5000' });
+  t.after(async () => {
+    await proxy.close();
+    await upstream.close();
+  });
+  await new Promise((resolve) => {
+    const target = new URL(`${proxy.url}/ghl/contacts/`);
+    const req = http.get({ hostname: target.hostname, port: target.port, path: target.pathname, headers: { 'X-Proxy-Key': KEY } });
+    req.on('error', () => resolve());
+    setTimeout(() => {
+      req.destroy();
+      resolve();
+    }, 150);
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  const { cookie } = await login(proxy);
+  const m = JSON.parse((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie } })).text).metrics;
+  assert.equal(m.cancelled, 1);
+  assert.equal(m['2xx'], 0);
+  assert.equal(m.recent[0].status, 499);
 });
 
 test('activity counters: rejections by cause; GHL permission denials apart; health and panel not counted as calls', async (t) => {

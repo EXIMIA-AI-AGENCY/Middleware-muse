@@ -31,7 +31,7 @@ function summarize(samples) {
 
 function pushBounded(list, item, max) {
   list.push(item);
-  if (list.length > max) list.splice(0, list.length - max);
+  if (list.length > max) list.shift();
 }
 
 /**
@@ -57,6 +57,7 @@ function createMetrics({ now = () => Date.now() } = {}) {
     rateLimited: 0,
     ghlDenied: 0,
     upstreamErrors: 0,
+    cancelled: 0,
   };
   const startedAt = now();
 
@@ -78,7 +79,8 @@ function createMetrics({ now = () => Date.now() } = {}) {
       counters.calls += 1;
       const bucket = `${Math.floor(status / 100)}xx`;
       if (bucket in counters) counters[bucket] += 1;
-      if (timing.upstreamError) counters.upstreamErrors += 1;
+      if (status === 499) counters.cancelled += 1;
+      else if (timing.upstreamError) counters.upstreamErrors += 1;
       else if (status === 401 || status === 403) counters.ghlDenied += 1;
       pushBounded(traffic, sample(method, url, status, timing), MAX_SAMPLES);
     },
@@ -116,13 +118,19 @@ function createTiming(startedAt) {
   const marks = { start: startedAt ?? process.hrtime.bigint(), sent: null, upstreamHeaders: null, relayed: null };
   return {
     sent() {
-      marks.sent = process.hrtime.bigint();
+      // First attempt only: after a stale-socket retry the lost time is GHL's, not the proxy's.
+      if (marks.sent === null) marks.sent = process.hrtime.bigint();
     },
     upstreamHeaders() {
       marks.upstreamHeaders = process.hrtime.bigint();
     },
     relayed() {
       marks.relayed = process.hrtime.bigint();
+    },
+    overheadSoFar() {
+      const now = process.hrtime.bigint();
+      if (!marks.sent || !marks.upstreamHeaders) return 0;
+      return ms(marks.start, marks.sent) + ms(marks.upstreamHeaders, now);
     },
     result(upstreamError) {
       const end = process.hrtime.bigint();

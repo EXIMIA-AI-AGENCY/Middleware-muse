@@ -120,11 +120,10 @@ function copyResponseHeaders(upstreamRes, res) {
   }
 }
 
-function createAgents() {
-  // `timeout` here applies to idle pooled sockets; active requests use their own timeout.
-  const options = { keepAlive: true, maxSockets: 64, maxFreeSockets: 16, timeout: 30_000, scheduling: 'lifo' };
-  return { 'http:': new http.Agent(options), 'https:': new https.Agent(options) };
-}
+// One keep-alive pool shared by /ghl and /mcp, so a warm connection serves both.
+// `timeout` applies to idle pooled sockets; active requests use their own timeout.
+const AGENT_OPTIONS = { keepAlive: true, maxSockets: 256, maxFreeSockets: 256, timeout: 30_000, scheduling: 'lifo' };
+const AGENTS = { 'http:': new http.Agent(AGENT_OPTIONS), 'https:': new https.Agent(AGENT_OPTIONS) };
 
 /**
  * Express middleware that forwards the request to `<upstreamBase><pathPrefix><req.url>`.
@@ -134,7 +133,7 @@ function createAgents() {
 function createForwarder(config, logger, { kind, pathPrefix }) {
   const upstream = config.upstreamBase;
   const transport = upstream.protocol === 'https:' ? https : http;
-  const agent = createAgents()[upstream.protocol];
+  const agent = AGENTS[upstream.protocol];
   const hostname = upstream.hostname.replace(/^\[|\]$/g, '');
 
   return function forward(req, res) {
@@ -196,6 +195,8 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
       const isStream = /text\/event-stream/i.test(upstreamRes.headers['content-type'] ?? '');
       // Keep reverse proxies such as nginx from buffering SSE (MCP streamable HTTP).
       if (isStream) res.setHeader('X-Accel-Buffering', 'no');
+      // The dashboard's own test calls learn how long the proxy itself took.
+      if (res.locals.check) res.setHeader('X-Proxy-Overhead-Ms', timing.overheadSoFar().toFixed(2));
       if (typeof statusMessage === 'string' && VALID_REASON.test(statusMessage)) {
         res.writeHead(statusCode, statusMessage);
       } else {
@@ -229,7 +230,8 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         timeout: config.upstreamTimeoutMs,
       });
       upstreamReq = outgoing;
-      timing.sent();
+      // Time waiting for a pooled socket counts as proxy time, not GHL time.
+      outgoing.once('socket', () => timing.sent());
 
       outgoing.on('timeout', () => {
         outgoing.destroy(upstreamError('UPSTREAM_TIMEOUT', 'upstream timeout'));

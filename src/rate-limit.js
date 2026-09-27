@@ -52,6 +52,8 @@ function createRateLimiter({ max, windowMs, now = () => Date.now() }) {
  */
 function rateLimitByKey(limiter) {
   return (req, res, next) => {
+    // The dashboard's marked test calls never eat into Muse's budget.
+    if (res.locals.check) return next();
     // Runs after requireProxyKey, so the header is the valid key; one bucket for it.
     const { allowed, retryAfterMs } = limiter.hit('proxy-key');
     if (allowed) return next();

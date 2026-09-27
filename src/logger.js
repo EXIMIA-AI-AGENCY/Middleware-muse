@@ -42,9 +42,10 @@ function requestLogger(logger, metrics, isCheck = () => false) {
         metrics.record({
           method: req.method,
           url: req.originalUrl,
-          status: res.statusCode,
+          // Client gave up before any answer: not a success, whatever res.statusCode says.
+          status: res.headersSent ? res.statusCode : 499,
           timing: timing && timing.result(upstreamError),
-          check: isCheck(req),
+          check: isCheck(req, res),
           flags: { rejectedKey, rejectedPin, rateLimited },
         });
       }

@@ -282,16 +282,28 @@ function createChecks(config, getSelfUrl, checkMarker) {
     if (selfUrl) {
       const directMs = [];
       const proxyMs = [];
+      const ownMs = [];
       for (let i = 0; i < 5; i += 1) {
         const d = await direct(`/contacts/?locationId=${loc}&limit=1`);
         const p = await viaProxy(`/ghl/contacts/?locationId=${loc}&limit=1`);
         if (d.status === 200) directMs.push(d.ms);
         if (p.status === 200) proxyMs.push(p.ms);
+        const own = Number(p.headers?.['x-proxy-overhead-ms']);
+        if (p.status === 200 && Number.isFinite(own)) ownMs.push(own);
       }
       if (directMs.length && proxyMs.length) {
         const dm = median(directMs);
         const pm = median(proxyMs);
-        speed = { directMs: round1(dm), proxyMs: round1(pm), differenceMs: round1(pm - dm), samples: directMs.length };
+        // GHL's own variation between calls: a smaller difference is just noise.
+        const spread = Math.max(...directMs) - Math.min(...directMs);
+        speed = {
+          proxyOwnMs: ownMs.length ? Math.round(median(ownMs) * 100) / 100 : null,
+          directMs: round1(dm),
+          proxyMs: round1(pm),
+          differenceMs: round1(pm - dm),
+          ghlSpreadMs: round1(spread),
+          samples: directMs.length,
+        };
       }
     }
 

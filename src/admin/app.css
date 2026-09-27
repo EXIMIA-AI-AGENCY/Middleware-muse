@@ -216,11 +216,12 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .check-ms { font: 13px var(--mono); color: var(--muted); white-space: nowrap; }
 
 /* Speed */
-.speed { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+.speed { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
 .metric { background: var(--surface-2); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .metric-label { font-size: 12px; color: var(--muted); }
 .metric-value { font: 650 20px/1.2 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 .metric-accent { background: var(--accent-soft); }
+.metric-hero { grid-column: 1 / -1; }
 .metric-accent .metric-value { color: var(--accent); }
 
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 14px 0 0; }
@@ -309,6 +310,5 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 
 @media (max-width: 420px) {
   .speed { grid-template-columns: 1fr 1fr; }
-  .speed .metric-accent { grid-column: 1 / -1; }
   .perm-list { grid-template-columns: 1fr; }
 }

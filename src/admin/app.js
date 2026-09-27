@@ -291,10 +291,15 @@
     );
 
     if (result.speed) {
-      $('speed-direct').textContent = fmtMs(result.speed.directMs);
-      $('speed-proxy').textContent = fmtMs(result.speed.proxyMs);
-      const diff = result.speed.differenceMs;
-      $('speed-diff').textContent = Math.abs(diff) < 1 ? '≈ 0 ms' : `${diff > 0 ? '+' : '−'}${Math.round(Math.abs(diff))} ms`;
+      const s = result.speed;
+      $('speed-own').textContent = s.proxyOwnMs === null ? '—' : fmtSmallMs(s.proxyOwnMs);
+      $('speed-direct').textContent = fmtMs(s.directMs);
+      $('speed-proxy').textContent = fmtMs(s.proxyMs);
+      const diff = s.differenceMs;
+      const within = Math.abs(diff) <= s.ghlSpreadMs;
+      $('speed-note').textContent = within
+        ? `Directo y por el proxy tardan lo mismo: la diferencia (${Math.round(diff)} ms) cabe en la variación normal de GoHighLevel (±${Math.round(s.ghlSpreadMs / 2)} ms).`
+        : `Por el proxy tarda ${Math.round(diff)} ms más que directo. Casi todo es el viaje de red hasta el servidor del proxy, no el proxy en sí.`;
     }
   }
 
@@ -371,6 +376,7 @@
       ['Frenadas por el límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
       ['GHL negó permiso', m.ghlDenied, m.ghlDenied ? 'warn' : ''],
       ['Sin respuesta de GHL', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
+      ['Canceladas por Muse', m.cancelled, m.cancelled ? 'warn' : ''],
     ];
     $('counters').replaceChildren(...chips.map(([label, value, tone]) => el('span', { class: `chip ${tone}` }, el('strong', { text: fmtNum(value) }), label)));
 
