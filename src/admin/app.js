@@ -2,14 +2,19 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const ICON = { ok: 'i-check', warn: 'i-warn', fail: 'i-x', pending: 'i-check' };
+  const ICON = { ok: 'i-check', warn: 'i-warn', fail: 'i-x', pending: 'i-check', offline: 'i-x' };
+  const STATE_WORD = { ok: 'Correcto', warn: 'Aviso', fail: 'Error' };
   const REFRESH_MS = 15000;
   const KEY_VISIBLE_MS = 60000;
+  const MASK = '••••••••••••••••••••••••••••••••';
 
   let refreshTimer = null;
   let keyTimer = null;
   let lockTimer = null;
-  let lastChecksAt = null;
+  let lastChecks = null; // last successful checks result
+  let lastOverviewOk = null; // Date of the last successful overview
+  let offlineSince = null;
+  let submitting = false;
 
   // ---------- helpers ----------
 
@@ -36,14 +41,26 @@
     return svg;
   }
 
+  /** Icon plus the state spelled out for screen readers. */
+  function stateIcon(state) {
+    return el('span', { class: 'check-icon' }, icon(ICON[state]), el('span', { class: 'sr-only', text: STATE_WORD[state] || '' }));
+  }
+
+  class NetworkError extends Error {}
+
   async function api(path, { method = 'GET', body } = {}) {
-    const res = await fetch(`/admin/api${path}`, {
-      method,
-      credentials: 'same-origin',
-      cache: 'no-store',
-      headers: body !== undefined || method !== 'GET' ? { 'Content-Type': 'application/json' } : {},
-      body: body !== undefined ? JSON.stringify(body) : method !== 'GET' ? '{}' : undefined,
-    });
+    let res;
+    try {
+      res = await fetch(`/admin/api${path}`, {
+        method,
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: method !== 'GET' ? { 'Content-Type': 'application/json' } : {},
+        body: method !== 'GET' ? JSON.stringify(body ?? {}) : undefined,
+      });
+    } catch {
+      throw new NetworkError('network');
+    }
     let data = null;
     if (res.status !== 204) {
       try {
@@ -60,28 +77,39 @@
   }
 
   let toastTimer = null;
-  function toast(message) {
+  function toast(message, { error = false } = {}) {
     const node = $('toast');
     node.textContent = message;
+    node.classList.toggle('is-error', error);
     node.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       node.hidden = true;
-    }, 2200);
+    }, error ? 6000 : 2500);
   }
 
-  async function copy(text, what) {
+  async function copyText(text) {
+    if (!navigator.clipboard || !window.isSecureContext) return false;
     try {
       await navigator.clipboard.writeText(text);
-      toast(`${what} copiado`);
+      return true;
     } catch {
-      toast('No se pudo copiar: selecciona el texto y cópialo a mano');
+      return false;
     }
   }
 
+  function selectNode(node) {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   const fmtMs = (v) => (v === null || v === undefined ? '—' : `${Math.round(v)} ms`);
+  const fmtSmallMs = (v) => (v === null || v === undefined ? '—' : v < 1 ? '< 1 ms' : `${Math.round(v)} ms`);
   const fmtNum = (v) => Number(v || 0).toLocaleString('es');
-  const fmtTime = (iso) => new Date(iso).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fmtTime = (value) => new Date(value).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   function ago(date) {
     const s = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
@@ -103,40 +131,46 @@
 
   // ---------- login ----------
 
+  function setLoginEnabled(enabled) {
+    $('pin').disabled = !enabled;
+    document.querySelectorAll('#login-form button').forEach((b) => (b.disabled = !enabled));
+  }
+
   function showLogin(message = '', isInfo = false) {
     stopRefresh();
+    hideKey();
     $('app').hidden = true;
     $('login').hidden = false;
     const msg = $('login-msg');
     msg.textContent = message;
     msg.classList.toggle('is-info', isInfo);
+    $('lock-timer').textContent = '';
     const pin = $('pin');
     pin.value = '';
-    pin.focus();
+    if (!pin.disabled) pin.focus();
   }
 
   function lockCountdown(seconds) {
-    const pin = $('pin');
+    const until = Date.now() + seconds * 1000;
     const msg = $('login-msg');
-    const buttons = document.querySelectorAll('#login-form button');
-    let left = seconds;
+    const timer = $('lock-timer');
+    msg.classList.remove('is-info');
+    msg.textContent = 'Demasiados intentos. El acceso está bloqueado un momento.';
     const tick = () => {
+      const left = Math.ceil((until - Date.now()) / 1000);
       if (left <= 0) {
         clearInterval(lockTimer);
-        pin.disabled = false;
-        buttons.forEach((b) => (b.disabled = false));
+        lockTimer = null;
+        setLoginEnabled(true);
         msg.textContent = '';
-        pin.focus();
+        timer.textContent = '';
+        $('pin').focus();
         return;
       }
-      const m = Math.floor(left / 60);
-      const s = String(left % 60).padStart(2, '0');
-      msg.textContent = `Demasiados intentos. Espera ${m}:${s}.`;
-      left -= 1;
+      timer.textContent = `Podrás intentarlo de nuevo en ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
     };
     clearInterval(lockTimer);
-    pin.disabled = true;
-    buttons.forEach((b) => (b.disabled = true));
+    setLoginEnabled(false);
     tick();
     lockTimer = setInterval(tick, 1000);
   }
@@ -144,13 +178,30 @@
   async function submitPin(event) {
     if (event) event.preventDefault();
     const pin = $('pin');
-    if (!pin.value || pin.disabled) return;
+    if (submitting || !pin.value || pin.disabled) return;
+    const value = pin.value;
+    pin.value = ''; // cleared right away: a retry never appends to an old attempt
+    submitting = true;
+    setLoginEnabled(false);
     const msg = $('login-msg');
     msg.classList.add('is-info');
     msg.textContent = 'Comprobando…';
-    const { status, data } = await api('/login', { method: 'POST', body: { pin: pin.value } });
-    pin.value = '';
+    let result = null;
+    try {
+      result = await api('/login', { method: 'POST', body: { pin: value } });
+    } catch {
+      result = null;
+    } finally {
+      submitting = false;
+      setLoginEnabled(true);
+    }
     msg.classList.remove('is-info');
+    if (!result) {
+      msg.textContent = 'No se pudo conectar con el proxy. Revisa tu conexión e intenta de nuevo.';
+      pin.focus();
+      return;
+    }
+    const { status, data } = result;
     if (status === 204) {
       msg.textContent = '';
       startApp();
@@ -158,8 +209,13 @@
       lockCountdown((data && data.retryAfterSeconds) || 30);
     } else if (status === 401) {
       const left = data && typeof data.attemptsLeft === 'number' ? data.attemptsLeft : null;
-      msg.textContent = left !== null && left <= 3 ? `PIN incorrecto. Antes del bloqueo te quedan ${left} intento${left === 1 ? '' : 's'}.` : 'PIN incorrecto.';
+      msg.textContent =
+        left !== null && left <= 3
+          ? `PIN incorrecto. Antes del bloqueo te ${left === 1 ? 'queda 1 intento' : `quedan ${left} intentos`}.`
+          : 'PIN incorrecto.';
       pin.focus();
+    } else if (status === 403) {
+      msg.textContent = 'El servidor rechazó el origen de la petición. Si usas un reverse proxy propio, debe reenviar el header Host.';
     } else {
       msg.textContent = 'No se pudo iniciar sesión. Intenta de nuevo.';
     }
@@ -172,6 +228,7 @@
     document.querySelectorAll('.keypad button[data-key]').forEach((button) => {
       button.addEventListener('click', () => {
         const pin = $('pin');
+        if (pin.disabled) return;
         const key = button.dataset.key;
         if (key === 'back') pin.value = pin.value.slice(0, -1);
         else if (pin.value.length < 64) pin.value += key;
@@ -179,27 +236,41 @@
     });
   }
 
-  // ---------- dashboard ----------
+  // ---------- status ----------
+
+  const TITLES = { ok: 'Todo funciona', warn: 'Funciona, con avisos', fail: 'Hay un problema', offline: 'Sin conexión con el proxy' };
+  const SUBS = {
+    ok: 'GoHighLevel, el proxy y el MCP responden bien. Muse puede usarlo.',
+    warn: 'Lo esencial funciona. Revisa los avisos de abajo.',
+    fail: 'Revisa el punto en rojo. Muse no podrá usar el proxy hasta corregirlo.',
+  };
+
+  function renderStatus() {
+    const badge = $('status-badge');
+    if (offlineSince) {
+      badge.dataset.state = 'fail';
+      badge.replaceChildren(icon(ICON.offline));
+      $('status-title').textContent = TITLES.offline;
+      $('status-sub').textContent = `No responde desde las ${fmtTime(offlineSince)}. Si acabas de desplegar, espera un minuto.`;
+      return;
+    }
+    if (!lastChecks) return;
+    badge.dataset.state = lastChecks.overall;
+    badge.replaceChildren(icon(ICON[lastChecks.overall]));
+    $('status-title').textContent = TITLES[lastChecks.overall];
+    $('status-sub').textContent = `${SUBS[lastChecks.overall]} Verificado ${ago(new Date(lastChecks.ranAt))}.`;
+  }
 
   function renderChecks(result) {
-    const titles = { ok: 'Todo funciona', warn: 'Funciona, con avisos', fail: 'Hay un problema' };
-    const subs = {
-      ok: 'GoHighLevel, el proxy y el MCP responden bien. Muse puede usarlo.',
-      warn: 'Lo esencial funciona. Revisa los avisos de abajo.',
-      fail: 'Revisa el punto en rojo. Muse no podrá usar el proxy hasta corregirlo.',
-    };
-    $('status-badge').dataset.state = result.overall;
-    $('status-badge').replaceChildren(icon(ICON[result.overall]));
-    $('status-title').textContent = titles[result.overall];
-    lastChecksAt = new Date(result.ranAt);
-    $('status-sub').textContent = `${subs[result.overall]} · Verificado ${ago(lastChecksAt)}.`;
+    lastChecks = result;
+    renderStatus();
 
     $('checks').replaceChildren(
       ...result.checks.map((c) =>
         el(
           'li',
           { class: 'check', 'data-state': c.status },
-          el('span', { class: 'check-icon' }, icon(ICON[c.status])),
+          stateIcon(c.status),
           el('div', {}, el('div', { class: 'check-label', text: c.label }), el('div', { class: 'check-detail', text: c.detail })),
           el('span', { class: 'check-ms', text: c.ms === null ? '' : fmtMs(c.ms) }),
         ),
@@ -212,7 +283,7 @@
             el(
               'li',
               { class: 'perm', 'data-ok': String(p.ok) },
-              el('span', { class: 'check-icon' }, icon(p.ok ? 'i-check' : 'i-x')),
+              stateIcon(p.ok ? 'ok' : 'fail'),
               el('div', {}, el('div', { class: 'perm-name', text: p.label }), el('div', { class: 'perm-detail', text: p.detail })),
             ),
           )
@@ -234,57 +305,72 @@
     $('status-badge').dataset.state = 'pending';
     try {
       const { status, data } = await api('/checks', { method: 'POST' });
-      if (status === 200 && data) renderChecks(data);
-      else toast('No se pudo verificar. Intenta de nuevo.');
-      refresh();
+      if (status === 200 && data) {
+        offlineSince = null;
+        renderChecks(data);
+      } else {
+        toast('No se pudo verificar. Intenta de nuevo.', { error: true });
+      }
     } catch (err) {
-      if (err.message !== 'unauthorized') toast('No se pudo verificar. Revisa tu conexión.');
+      if (err instanceof NetworkError) {
+        offlineSince = offlineSince || new Date();
+        toast('No se pudo conectar con el proxy.', { error: true });
+      }
     } finally {
       button.disabled = false;
       button.textContent = 'Verificar ahora';
+      renderStatus();
+      if (!lastChecks && !offlineSince) $('status-badge').dataset.state = 'pending';
+      refresh();
     }
   }
 
+  // ---------- overview ----------
+
   function renderOverview(o) {
     $('host-label').textContent = o.connection.middleware_host;
-    $('connection').textContent = o.connection ? o.connectionMarkdown.replace(/^[\s\S]*?```yaml\n|```\s*$/g, '').trim() : '—';
+    $('connection').textContent = o.connectionMarkdown.replace(/^[\s\S]*?```yaml\n|```\s*$/g, '').trim();
     $('connection').dataset.markdown = o.connectionMarkdown;
     $('health-url').textContent = o.connection.health_url;
 
     const m = o.metrics;
-    const w = m.last15m;
+    const real = m.last15m.count > 0;
+    const w = real ? m.last15m : m.checks;
+    $('traffic-title').textContent = real ? 'Llamadas reales de Muse (últimos 15 min)' : 'Según las pruebas del panel (aún no hay llamadas de Muse)';
     $('traffic').replaceChildren(
-      el('dt', { text: 'Llamadas (últimos 15 min)' }),
+      el('dt', { text: 'Llamadas' }),
       el('dd', { text: fmtNum(w.count) }),
-      el('dt', { text: 'Tiempo de GoHighLevel (mediana)' }),
+      el('dt', { text: 'Tiempo de respuesta de GoHighLevel' }),
       el('dd', { text: fmtMs(w.ghlMs.p50) }),
-      el('dt', { text: 'Tiempo que añade el proxy (mediana)' }),
-      el('dd', { text: w.overheadMs.p50 === null ? '—' : `${w.overheadMs.p50 < 1 ? '< 1' : Math.round(w.overheadMs.p50)} ms` }),
-      el('dt', { text: 'Tiempo que añade el proxy (p95)' }),
-      el('dd', { text: w.overheadMs.p95 === null ? '—' : `${w.overheadMs.p95 < 1 ? '< 1' : Math.round(w.overheadMs.p95)} ms` }),
+      el('dt', { text: 'Tiempo que añade el proxy' }),
+      el('dd', { text: fmtSmallMs(w.overheadMs.p50) }),
+      el('dt', { text: 'Tiempo que añade el proxy (peor 5 %)' }),
+      el('dd', { text: fmtSmallMs(w.overheadMs.p95) }),
     );
 
     const c = o.config;
     $('security').replaceChildren(
-      el('dt', { text: 'HTTPS' }),
-      el('dd', { class: o.https ? 'ok' : 'warn', text: o.https ? 'Activo' : 'No (solo válido en local)' }),
+      el('dt', { text: 'Conexión cifrada (HTTPS)' }),
+      el('dd', { class: o.https ? 'ok' : 'warn', text: o.https ? 'Activa' : 'No (solo válido en local)' }),
       el('dt', { text: 'Acceso al panel' }),
-      el('dd', { text: 'PIN + bloqueo tras 5 intentos' }),
+      el('dd', { text: 'PIN, con bloqueo tras 5 intentos' }),
       el('dt', { text: 'Llave del proxy' }),
       el('dd', { text: `${c.proxyKeyLength} caracteres` }),
       el('dt', { text: 'Token de GoHighLevel' }),
-      el('dd', { text: `${c.ghlTokenHint} (solo en el servidor)` }),
-      el('dt', { text: 'Sub-account (locationId)' }),
+      el('dd', { text: `${c.ghlTokenHint} (nunca sale del servidor)` }),
+      el('dt', { text: 'Subcuenta de GHL' }),
       el('dd', { text: c.locationId }),
-      el('dt', { text: 'Límite por llave' }),
-      el('dd', { text: `${c.rateLimit.max} llamadas / ${c.rateLimit.windowSeconds} s` }),
+      el('dt', { text: 'Límite de llamadas' }),
+      el('dd', { text: `${c.rateLimit.max} cada ${c.rateLimit.windowSeconds} s` }),
     );
 
     const chips = [
-      ['Llamadas desde el arranque', m.total, ''],
-      ['Rechazadas (llave o PIN)', m.unauthorized, m.unauthorized ? 'warn' : ''],
-      ['Frenadas por límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
-      ['Errores hacia GHL', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
+      ['Llamadas de Muse', m.calls, ''],
+      ['Llave incorrecta', m.rejectedKey, m.rejectedKey ? 'warn' : ''],
+      ['PIN incorrecto', m.rejectedPin, m.rejectedPin ? 'warn' : ''],
+      ['Frenadas por el límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
+      ['GHL negó permiso', m.ghlDenied, m.ghlDenied ? 'warn' : ''],
+      ['Sin respuesta de GHL', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
     ];
     $('counters').replaceChildren(...chips.map(([label, value, tone]) => el('span', { class: `chip ${tone}` }, el('strong', { text: fmtNum(value) }), label)));
 
@@ -295,29 +381,30 @@
               'tr',
               {},
               el('td', { class: 'time', text: fmtTime(r.at) }),
-              el('td', { class: 'path' }, `${r.method} ${r.path}`, r.check ? el('span', { class: 'tag', text: 'prueba del panel' }) : null),
+              el('td', { class: 'path', text: `${r.method} ${r.path}` }),
               el('td', { class: 'num' }, el('span', { class: `status-pill s${String(r.status)[0]}`, text: String(r.status) })),
               el('td', { class: 'num', text: fmtMs(r.ghlMs) }),
-              el('td', { class: 'num', text: fmtMs(r.totalMs) }),
+              el('td', { class: 'num col-total', text: fmtMs(r.totalMs) }),
             ),
           )
-        : [el('tr', {}, el('td', { class: 'empty', colspan: 5, text: 'Todavía no hay llamadas.' }))]),
+        : [el('tr', {}, el('td', { class: 'empty', colspan: 5, text: 'Todavía no hay llamadas de Muse.' }))]),
     );
-    $('activity-updated').textContent = `Actualizado ${fmtTime(new Date().toISOString())}`;
     $('footer').textContent = `ghl-proxy v${o.version} · encendido hace ${uptime(o.uptimeSeconds)}`;
-    if (lastChecksAt) {
-      const sub = $('status-sub').textContent.replace(/ · Verificado .*$/, '');
-      $('status-sub').textContent = `${sub} · Verificado ${ago(lastChecksAt)}.`;
-    }
   }
 
   async function refresh() {
     try {
       const { status, data } = await api('/overview');
-      if (status === 200 && data) renderOverview(data);
-    } catch {
-      // handled in api() for 401; network blips are retried on the next tick
+      if (status === 200 && data) {
+        renderOverview(data);
+        lastOverviewOk = new Date();
+        offlineSince = null;
+      }
+    } catch (err) {
+      if (err instanceof NetworkError) offlineSince = offlineSince || new Date();
     }
+    renderStatus();
+    $('activity-updated').textContent = lastOverviewOk ? `Actualizado ${fmtTime(lastOverviewOk)}` : '';
   }
 
   function stopRefresh() {
@@ -325,12 +412,26 @@
     refreshTimer = null;
   }
 
+  // ---------- key ----------
+
   function hideKey() {
     clearTimeout(keyTimer);
     const node = $('proxy-key');
-    node.textContent = '••••••••••••••••••••••••••••••••';
+    node.textContent = MASK;
     node.classList.remove('is-revealed');
     $('reveal-key').textContent = 'Mostrar';
+    $('new-key').hidden = true;
+    $('new-key').textContent = '';
+    $('copy-new-key').hidden = true;
+  }
+
+  function showKey(key) {
+    const node = $('proxy-key');
+    node.textContent = key;
+    node.classList.add('is-revealed');
+    $('reveal-key').textContent = 'Ocultar';
+    clearTimeout(keyTimer);
+    keyTimer = setTimeout(hideKey, KEY_VISIBLE_MS);
   }
 
   async function fetchKey() {
@@ -339,32 +440,113 @@
     return data.proxyKey;
   }
 
+  async function copyKey() {
+    // Safari only allows clipboard writes started inside the tap, so hand it a pending item.
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext) {
+      let fetched = null;
+      const blob = fetchKey().then((key) => {
+        fetched = key;
+        return new Blob([key], { type: 'text/plain' });
+      });
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+        toast('Llave copiada');
+        return;
+      } catch (err) {
+        if (err && err.message === 'unauthorized') return;
+        if (fetched === null) {
+          try {
+            fetched = await blob.then(() => fetched);
+          } catch (e) {
+            if (e && e.message === 'unauthorized') return;
+          }
+        }
+        if (fetched && (await copyText(fetched))) {
+          toast('Llave copiada');
+          return;
+        }
+        if (fetched) return manualCopy(fetched);
+      }
+    }
+    try {
+      const key = await fetchKey();
+      if (await copyText(key)) toast('Llave copiada');
+      else manualCopy(key);
+    } catch (err) {
+      if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+      else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
+    }
+  }
+
+  function manualCopy(key) {
+    showKey(key);
+    selectNode($('proxy-key'));
+    toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
+  }
+
+  async function download() {
+    try {
+      const res = await fetch('/admin/api/connection.md', { credentials: 'same-origin', cache: 'no-store' });
+      if (res.status === 401) return showLogin('Tu sesión expiró. Ingresa el PIN de nuevo.', true);
+      if (!res.ok) throw new Error('download');
+      const url = URL.createObjectURL(await res.blob());
+      const a = el('a', { href: url, download: 'CONNECTION.md' });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      toast('No se pudo descargar. Usa «Copiar».', { error: true });
+    }
+  }
+
+  // ---------- wiring ----------
+
   function wireApp() {
     $('run-checks').addEventListener('click', runChecks);
     $('logout').addEventListener('click', async () => {
-      await api('/logout', { method: 'POST' }).catch(() => {});
-      hideKey();
-      showLogin('Sesión cerrada.', true);
-    });
-    $('copy-connection').addEventListener('click', () => copy($('connection').dataset.markdown || $('connection').textContent, 'CONNECTION.md'));
-    $('reveal-key').addEventListener('click', async () => {
-      const node = $('proxy-key');
-      if (node.classList.contains('is-revealed')) return hideKey();
+      let status = 0;
       try {
-        node.textContent = await fetchKey();
-        node.classList.add('is-revealed');
-        $('reveal-key').textContent = 'Ocultar';
-        clearTimeout(keyTimer);
-        keyTimer = setTimeout(hideKey, KEY_VISIBLE_MS);
-      } catch (err) {
-        if (err.message !== 'unauthorized') toast('No se pudo obtener la llave');
+        ({ status } = await api('/logout', { method: 'POST' }));
+      } catch {
+        status = 0;
+      }
+      if (status === 204) showLogin('Sesión cerrada.', true);
+      else toast('No se pudo cerrar la sesión. Revisa tu conexión e intenta de nuevo.', { error: true });
+    });
+    $('copy-connection').addEventListener('click', async () => {
+      const text = $('connection').dataset.markdown || $('connection').textContent;
+      if (await copyText(text)) toast('CONNECTION.md copiado');
+      else {
+        selectNode($('connection'));
+        toast('Tu navegador no dejó copiar. El texto está seleccionado: mantén pulsado para copiarlo.', { error: true });
       }
     });
-    $('copy-key').addEventListener('click', async () => {
+    $('download-connection').addEventListener('click', download);
+    $('reveal-key').addEventListener('click', async () => {
+      if ($('proxy-key').classList.contains('is-revealed')) return hideKey();
       try {
-        await copy(await fetchKey(), 'Llave');
+        showKey(await fetchKey());
       } catch (err) {
-        if (err.message !== 'unauthorized') toast('No se pudo obtener la llave');
+        if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+        else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
+      }
+    });
+    $('copy-key').addEventListener('click', copyKey);
+    $('generate-key').addEventListener('click', () => {
+      // Generated locally with the browser's CSPRNG; never sent to the server.
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      $('new-key').textContent = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      $('new-key').hidden = false;
+      $('copy-new-key').hidden = false;
+      $('generate-key').textContent = 'Generar otra';
+    });
+    $('copy-new-key').addEventListener('click', async () => {
+      if (await copyText($('new-key').textContent)) toast('Llave nueva copiada');
+      else {
+        selectNode($('new-key'));
+        toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
       }
     });
     document.addEventListener('visibilitychange', () => {
@@ -390,7 +572,7 @@
       if (data && data.authenticated) startApp();
       else showLogin();
     } catch {
-      showLogin('No se pudo conectar con el proxy.');
+      showLogin('No se pudo conectar con el proxy. Recarga la página en un momento.');
     }
   }
 

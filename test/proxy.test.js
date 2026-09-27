@@ -126,6 +126,10 @@ test('strips hop-by-hop and hosting-platform headers', async (t) => {
       'Fly-Client-IP': '203.0.113.9',
       'X-Railway-Request-Id': 'r1',
       'Rndr-Id': 'r2',
+      'X-Vercel-Id': 'iad1::abc',
+      'X-Vercel-Oidc-Token': 'vercel-credential',
+      'X-Vercel-Forwarded-For': '203.0.113.9',
+      'X-Matched-Path': '/index',
     }),
   });
   const names = Object.keys(upstream.requests[0].headers);
@@ -145,6 +149,10 @@ test('strips hop-by-hop and hosting-platform headers', async (t) => {
     'fly-client-ip',
     'x-railway-request-id',
     'rndr-id',
+    'x-vercel-id',
+    'x-vercel-oidc-token',
+    'x-vercel-forwarded-for',
+    'x-matched-path',
   ]) {
     assert.ok(!names.includes(dropped), `${dropped} should not be forwarded`);
   }

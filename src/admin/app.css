@@ -54,6 +54,10 @@ body {
   min-height: 100vh;
 }
 [hidden] { display: none !important; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
 .sprite { position: absolute; }
 h1, h2, h3 { margin: 0; line-height: 1.25; }
 h1 { font-size: 18px; font-weight: 650; }
@@ -73,8 +77,8 @@ code, pre { font-family: var(--mono); font-size: 13px; }
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 40px;
-  padding: 8px 14px;
+  min-height: 44px;
+  padding: 8px 16px;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -122,6 +126,8 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .pin-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .login-msg { min-height: 20px; font-size: 14px; color: var(--fail); text-align: center; }
 .login-msg.is-info { color: var(--muted); }
+.lock-timer { min-height: 0; margin: -8px 0 0; font: 600 15px/1.4 var(--mono); text-align: center; color: var(--text); }
+.lock-timer:empty { display: none; }
 .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .keypad button {
   height: 56px; border-radius: 14px; border: 1px solid var(--border);
@@ -131,12 +137,20 @@ code, pre { font-family: var(--mono); font-size: 13px; }
   touch-action: manipulation;
 }
 .keypad button:active { background: var(--border); }
+.keypad button:disabled { opacity: 0.45; cursor: not-allowed; }
 .keypad .key-muted { color: var(--muted); }
 .keypad .key-go { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-size: 16px; }
 .login-submit { display: none; }
 @media (hover: hover) and (pointer: fine) {
   .keypad { display: none; }
   .login-submit { display: inline-flex; }
+}
+@media (orientation: landscape) and (max-height: 520px) {
+  .login { padding: 12px; }
+  .login-card { max-width: 640px; display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; row-gap: 10px; padding: 16px; }
+  .login-card > :not(.keypad) { grid-column: 1; }
+  .login-card .keypad { grid-column: 2; grid-row: 1 / span 6; gap: 8px; }
+  .keypad button { height: 44px; }
 }
 
 /* App shell */
@@ -268,11 +282,29 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 
 /* Toast */
 .toast {
-  position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom));
-  transform: translateX(-50%);
+  position: fixed; left: 16px; right: 16px; bottom: max(20px, env(safe-area-inset-bottom));
+  margin: 0 auto; width: max-content;
   background: var(--text); color: var(--bg);
   padding: 10px 16px; border-radius: 10px; font-size: 14px; font-weight: 550;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2); z-index: 10; max-width: calc(100% - 32px);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2); z-index: 10; max-width: min(520px, calc(100% - 32px));
+  text-align: center;
+}
+.toast.is-error { background: var(--fail); color: #fff; }
+.kv-title { margin: 14px 0 -4px; font-weight: 600; }
+
+.rotate { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.rotate summary { cursor: pointer; font-weight: 600; min-height: 32px; display: flex; align-items: center; }
+.rotate-steps { margin: 8px 0 12px; padding-left: 20px; color: var(--muted); display: grid; gap: 6px; }
+.rotate .code-inline { margin-bottom: 10px; color: var(--accent); }
+
+@media (max-width: 520px) {
+  .table .col-total { display: none; }
+}
+
+@media (pointer: coarse) {
+  .small, .metric-label, .perm-detail, .table, .check-detail, .kv dt { font-size: 14px; }
+  .table td.path { font-size: 13px; }
+  .tag, .status-pill { font-size: 12px; }
 }
 
 @media (max-width: 420px) {

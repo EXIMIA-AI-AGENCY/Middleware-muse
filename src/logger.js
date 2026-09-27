@@ -38,13 +38,14 @@ function requestLogger(logger, metrics, isCheck = () => false) {
       if (!res.writableFinished) fields.aborted = true;
       logger.info(fields);
       if (metrics) {
-        const { timing, upstreamError } = res.locals;
+        const { timing, upstreamError, rejectedKey, rejectedPin, rateLimited } = res.locals;
         metrics.record({
           method: req.method,
           url: req.originalUrl,
           status: res.statusCode,
           timing: timing && timing.result(upstreamError),
           check: isCheck(req),
+          flags: { rejectedKey, rejectedPin, rateLimited },
         });
       }
     });

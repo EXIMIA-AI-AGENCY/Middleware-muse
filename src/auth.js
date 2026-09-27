@@ -16,6 +16,7 @@ function requireProxyKey(proxyKey) {
     if (typeof provided === 'string' && provided.length > 0 && crypto.timingSafeEqual(sha256(provided), expected)) {
       return next();
     }
+    res.locals.rejectedKey = true;
     return sendJson(res, 401, { error: 'unauthorized' });
   };
 }

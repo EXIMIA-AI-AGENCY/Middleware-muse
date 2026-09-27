@@ -64,6 +64,16 @@ test('UPSTREAM_USER_AGENT can replace the default browser signature', () => {
   assert.throws(() => loadConfig({ ...base, UPSTREAM_USER_AGENT: 'Mozilla/5.0\u0000x' }), /UPSTREAM_USER_AGENT/);
 });
 
+test('ADMIN_PIN: optional, 6-64 chars, never weak or reused', () => {
+  assert.equal(loadConfig(base).adminPin, null);
+  assert.equal(loadConfig({ ...base, ADMIN_PIN: '24681357' }).adminPin, '24681357');
+  assert.throws(() => loadConfig({ ...base, ADMIN_PIN: '12345' }), /between 6 and 64/);
+  for (const weak of ['000000', '11111111', '123456', '12345678', '3456789', '987654', '98765432', '121212', '123123', '20242024', '112233', 'aaaaaa']) {
+    assert.throws(() => loadConfig({ ...base, ADMIN_PIN: weak }), (err) => /too easy to guess/.test(err.message) && !err.message.includes(weak), weak);
+  }
+  assert.throws(() => loadConfig({ ...base, ADMIN_PIN: KEY }), /different/);
+});
+
 test('GHL_BASE_URL must be a bare http(s) origin', () => {
   assert.equal(loadConfig({ ...base, GHL_BASE_URL: 'http://127.0.0.1:9999' }).upstreamBase.port, '9999');
   assert.throws(() => loadConfig({ ...base, GHL_BASE_URL: 'ftp://x' }), /https/);

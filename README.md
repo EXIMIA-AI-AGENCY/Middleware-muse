@@ -352,6 +352,9 @@ location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
+    proxy_set_header Host $host;                 # CONNECTION.md y el panel usan el host real
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;  # cookie Secure y HSTS del panel
     proxy_buffering off;
     proxy_read_timeout 300s;
 }
@@ -392,8 +395,12 @@ Cómo se protege:
   bloqueando a propósito, el proxy de Muse sigue funcionando igual. Un
   redeploy desbloquea el panel.
 - **Sesión** en cookie `HttpOnly`, `Secure`, `SameSite=Strict`, firmada con
-  una clave aleatoria por proceso. Dura 12 h. Reiniciar el servicio (por
-  ejemplo, al cambiar el PIN) cierra todas las sesiones.
+  una clave aleatoria por proceso. Dura 12 h. **Salir** la invalida en el
+  servidor (una copia de la cookie deja de servir). Reiniciar el servicio
+  (por ejemplo, al cambiar el PIN) cierra todas las sesiones.
+- **PIN débiles rechazados al arrancar:** dígitos repetidos (`000000`),
+  secuencias (`123456`, `98765432`), patrones repetidos (`121212`, `123123`)
+  y PIN comunes. Usa 8 dígitos al azar.
 - Las acciones solo se aceptan con JSON del mismo origen (anti-CSRF). La CSP
   es estricta (sin scripts inline ni recursos externos), el panel no se puede
   embeber en otra página (anti-clickjacking) y va con `no-store` y HSTS.

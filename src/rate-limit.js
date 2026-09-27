@@ -55,6 +55,7 @@ function rateLimitByKey(limiter) {
     // Runs after requireProxyKey, so the header is the valid key; one bucket for it.
     const { allowed, retryAfterMs } = limiter.hit('proxy-key');
     if (allowed) return next();
+    res.locals.rateLimited = true;
     return sendJson(res, 429, { error: 'rate_limited' }, { 'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) });
   };
 }

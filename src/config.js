@@ -23,6 +23,26 @@ const HEADER_SAFE = /^[\x21-\x7e]+$/;
 // Same, but inner spaces allowed (User-Agent values contain them).
 const HEADER_SAFE_WITH_SPACES = /^[\x21-\x7e][\x20-\x7e]*$/;
 
+// PINs anyone would try first. Patterns (same digit, straight runs) are checked separately.
+const COMMON_PINS = new Set([
+  '123123', '112233', '121212', '131313', '123321', '159753', '147258', '258369', '102030', '696969',
+  '520520', '11223344', '12121212', '12344321', '87654321', '12341234', '11112222', '19901990', '20002000',
+]);
+
+function isWeakPin(pin) {
+  if (/^(.)\1+$/.test(pin)) return true; // 000000, 11111111, aaaaaa
+  if (COMMON_PINS.has(pin)) return true;
+  if (/^\d+$/.test(pin)) {
+    const up = '01234567890123456789';
+    const down = '98765432109876543210';
+    if (up.includes(pin) || down.includes(pin)) return true; // 123456, 3456789, 987654
+    if (pin.length % 2 === 0 && /^(\d\d)\1+$/.test(pin)) return true; // 121212, 707070
+    if (pin.length % 3 === 0 && /^(\d{3})\1+$/.test(pin)) return true; // 123123, 456456
+    if (pin.length % 4 === 0 && /^(\d{4})\1+$/.test(pin)) return true; // 20242024
+  }
+  return false;
+}
+
 class ConfigError extends Error {
   constructor(message) {
     super(message);
@@ -93,6 +113,9 @@ function loadConfig(env = process.env) {
     if (adminPin === proxyKey || adminPin === ghlToken) {
       throw new ConfigError('ADMIN_PIN must be different from PROXY_KEY and GHL_TOKEN');
     }
+    if (isWeakPin(adminPin)) {
+      throw new ConfigError('ADMIN_PIN is too easy to guess (repeated digits, straight runs or a common PIN); use 8 random digits');
+    }
   }
 
   const userAgent = (env.UPSTREAM_USER_AGENT ?? '').trim() || DEFAULTS.userAgent;
@@ -122,4 +145,4 @@ function loadConfig(env = process.env) {
   });
 }
 
-module.exports = { loadConfig, ConfigError, DEFAULTS, MIN_PROXY_KEY_LENGTH, MIN_ADMIN_PIN_LENGTH };
+module.exports = { loadConfig, ConfigError, DEFAULTS, MIN_PROXY_KEY_LENGTH, MIN_ADMIN_PIN_LENGTH, isWeakPin };

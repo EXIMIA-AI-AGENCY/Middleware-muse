@@ -70,10 +70,29 @@ function createLockout({ freeAttempts = 5, baseLockMs = 30_000, maxLockMs = 60 *
   };
 }
 
-function createSessions({ ttlMs = SESSION_TTL_MS, now = () => Date.now() } = {}) {
-  // Per-process key: restarting (e.g. after changing ADMIN_PIN) signs everyone out.
-  const key = crypto.randomBytes(32);
+function createSessions({ ttlMs = SESSION_TTL_MS, now = () => Date.now(), secret } = {}) {
+  // Derived from the secrets when given, so every instance (serverless) accepts the same
+  // cookie and changing ADMIN_PIN or PROXY_KEY signs everyone out. Random otherwise.
+  const key = secret
+    ? crypto.createHmac('sha256', secret).update('ghl-proxy admin session v1').digest()
+    : crypto.randomBytes(32);
   const sign = (payload) => crypto.createHmac('sha256', key).update(payload).digest('base64url');
+  const revoked = new Map(); // payload -> expiry, so a copied cookie dies on "Salir"
+  const pruneRevoked = () => {
+    const t = now();
+    for (const [payload, exp] of revoked) if (exp <= t) revoked.delete(payload);
+  };
+  const verify = (token) => {
+    if (typeof token !== 'string') return null;
+    const cut = token.lastIndexOf('.');
+    if (cut <= 0) return null;
+    const payload = token.slice(0, cut);
+    const expected = sign(payload);
+    const given = token.slice(cut + 1);
+    if (given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) return null;
+    const exp = Number(payload.split('.', 1)[0]);
+    return exp > now() ? { payload, exp } : null;
+  };
   return {
     ttlMs,
     issue() {
@@ -81,14 +100,14 @@ function createSessions({ ttlMs = SESSION_TTL_MS, now = () => Date.now() } = {})
       return `${payload}.${sign(payload)}`;
     },
     valid(token) {
-      if (typeof token !== 'string') return false;
-      const cut = token.lastIndexOf('.');
-      if (cut <= 0) return false;
-      const payload = token.slice(0, cut);
-      const expected = sign(payload);
-      const given = token.slice(cut + 1);
-      if (given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) return false;
-      return Number(payload.split('.', 1)[0]) > now();
+      const session = verify(token);
+      return session !== null && !revoked.has(session.payload);
+    },
+    revoke(token) {
+      const session = verify(token);
+      if (!session) return;
+      pruneRevoked();
+      revoked.set(session.payload, session.exp);
     },
   };
 }
@@ -203,32 +222,38 @@ function createChecks(config, getSelfUrl, checkMarker) {
     const checks = [];
     const add = (id, label, status, detail, ms) => checks.push({ id, label, status, detail, ms: ms === undefined ? null : round1(ms) });
 
-    add('https', 'Conexión cifrada (HTTPS)', secure ? 'ok' : 'warn', secure ? 'El panel y el proxy se usan por HTTPS.' : 'Esta visita no llegó por HTTPS. En producción usa siempre https://');
+    add('https', 'Conexión cifrada (HTTPS)', secure ? 'ok' : 'warn', secure ? 'El panel y el proxy se usan por HTTPS.' : 'Esta visita no llegó cifrada (HTTPS). En producción abre siempre la dirección con https://');
 
     const location = await direct(`/locations/${loc}`);
     const locBody = parseJson(location.text);
     if (location.status === 200) {
       const name = locBody && locBody.location && locBody.location.name;
-      add('ghl_token', 'Token de GoHighLevel', 'ok', `Válido. Sub-account: ${name || config.ghlLocationId}`, location.ms);
+      add('ghl_token', 'Token de GoHighLevel', 'ok', `Válido. Subcuenta: ${name || config.ghlLocationId}`, location.ms);
     } else {
       add('ghl_token', 'Token de GoHighLevel', 'fail', `GHL respondió ${ghlMessage(location)}. Revisa GHL_TOKEN.`, location.ms);
     }
 
     const selfUrl = getSelfUrl();
     if (!selfUrl) {
-      add('proxy_rest', 'Proxy REST (como Muse)', 'warn', 'El servidor aún no está escuchando.');
+      add('proxy_rest', 'Conexión de Muse (API)', 'warn', 'El servidor aún no está escuchando.');
     } else {
       const rest = await viaProxy(`/ghl/contacts/?locationId=${loc}&limit=1`);
       const body = parseJson(rest.text);
       const total = body && body.meta && typeof body.meta.total === 'number' ? body.meta.total : null;
       if (rest.status === 200) {
-        add('proxy_rest', 'Proxy REST (como Muse)', 'ok', `GET /ghl/contacts/ → 200${total !== null ? ` · ${total.toLocaleString('es')} contactos` : ''}`, rest.ms);
+        add('proxy_rest', 'Conexión de Muse (API)', 'ok', `Responde bien${total !== null ? ` · ${total.toLocaleString('es')} contactos en GHL` : ''}`, rest.ms);
       } else {
-        add('proxy_rest', 'Proxy REST (como Muse)', 'fail', `GET /ghl/contacts/ → ${ghlMessage(rest)}`, rest.ms);
+        add('proxy_rest', 'Conexión de Muse (API)', 'fail', `La llamada de prueba falló: ${ghlMessage(rest)}`, rest.ms);
       }
 
       const noKey = await call(selfUrl, `/ghl/contacts/?locationId=${loc}&limit=1`, { headers: mark });
-      add('auth', 'Sin llave no entra nadie', noKey.status === 401 ? 'ok' : 'fail', `Llamada sin X-Proxy-Key → ${noKey.status}`, noKey.ms);
+      add(
+        'auth',
+        'Sin llave no entra nadie',
+        noKey.status === 401 ? 'ok' : 'fail',
+        noKey.status === 401 ? 'Una llamada sin la llave fue rechazada, como debe ser.' : `Una llamada sin la llave NO fue rechazada (HTTP ${noKey.status}).`,
+        noKey.ms,
+      );
 
       const list = await mcp({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
       const tools = parseMcp(list);
@@ -237,11 +262,11 @@ function createChecks(config, getSelfUrl, checkMarker) {
       const callMsg = parseMcp(call1);
       const callOk = Boolean(callMsg && callMsg.result && !callMsg.result.isError);
       if (list.status === 200 && toolCount !== null && callOk) {
-        add('proxy_mcp', 'MCP (como Muse)', 'ok', `${toolCount} herramientas disponibles · tools/call responde con datos`, list.ms + call1.ms);
+        add('proxy_mcp', 'Conexión de Muse (MCP)', 'ok', `${toolCount} herramientas disponibles y responden con datos reales`, list.ms + call1.ms);
       } else if (list.status === 200 && toolCount !== null) {
-        add('proxy_mcp', 'MCP (como Muse)', 'warn', `${toolCount} herramientas, pero tools/call devolvió error (¿token o permisos?).`, list.ms + call1.ms);
+        add('proxy_mcp', 'Conexión de Muse (MCP)', 'warn', `${toolCount} herramientas, pero al usarlas GHL devolvió un error (¿token o permisos?).`, list.ms + call1.ms);
       } else {
-        add('proxy_mcp', 'MCP (como Muse)', 'fail', `POST /mcp/ → ${ghlMessage(list)}`, list.ms);
+        add('proxy_mcp', 'Conexión de Muse (MCP)', 'fail', `La llamada de prueba falló: ${ghlMessage(list)}`, list.ms);
       }
     }
 
@@ -287,7 +312,15 @@ function createChecks(config, getSelfUrl, checkMarker) {
  * The operator dashboard under /admin, protected by ADMIN_PIN.
  * Mounted before the X-Proxy-Key middleware; only exists when ADMIN_PIN is set.
  */
-function createAdminRouter({ config, logger, metrics, getSelfUrl, checkMarker, lockout = createLockout(), sessions = createSessions() }) {
+function createAdminRouter({
+  config,
+  logger,
+  metrics,
+  getSelfUrl,
+  checkMarker,
+  lockout = createLockout(),
+  sessions = createSessions({ secret: `${config.proxyKey}\u0000${config.adminPin}` }),
+}) {
   const router = express.Router();
   const staticFiles = Object.fromEntries(
     Object.entries(STATIC_FILES).map(([route, { file, type }]) => [route, { type, body: fs.readFileSync(path.join(STATIC_DIR, file)) }]),
@@ -319,6 +352,12 @@ function createAdminRouter({ config, logger, metrics, getSelfUrl, checkMarker, l
   const sameOriginJson = (req, res, next) => {
     if (!/^application\/json\b/i.test(req.headers['content-type'] ?? '')) {
       return sendJson(res, 415, { error: 'json_required' });
+    }
+    // Sec-Fetch-Site is set by the browser and cannot be forged by a page; it keeps
+    // working behind reverse proxies that rewrite Host.
+    const fetchSite = req.headers['sec-fetch-site'];
+    if (fetchSite) {
+      return fetchSite === 'same-origin' ? next() : sendJson(res, 403, { error: 'forbidden_origin' });
     }
     const origin = req.headers.origin;
     if (origin) {
@@ -353,6 +392,7 @@ function createAdminRouter({ config, logger, metrics, getSelfUrl, checkMarker, l
       res.writeHead(204);
       return res.end();
     }
+    res.locals.rejectedPin = true;
     const attemptsLeft = lockout.fail();
     const lockedFor = lockout.lockedForMs();
     logger.warn({ msg: 'admin_login_failed', locked: lockedFor > 0 });
@@ -364,6 +404,7 @@ function createAdminRouter({ config, logger, metrics, getSelfUrl, checkMarker, l
   });
 
   router.post('/api/logout', sameOriginJson, (req, res) => {
+    sessions.revoke(readCookie(req, COOKIE));
     setCookie(req, res, '', 0);
     res.writeHead(204);
     res.end();

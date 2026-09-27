@@ -35,8 +35,9 @@ const DROP_REQUEST = new Set([
   'x-real-ip',
   'true-client-ip',
   'cdn-loop',
+  'x-matched-path', // Vercel routing metadata
 ]);
-const DROP_REQUEST_PREFIXES = ['x-forwarded-', 'cf-', 'fly-', 'x-railway-', 'rndr-', 'x-render-'];
+const DROP_REQUEST_PREFIXES = ['x-forwarded-', 'cf-', 'fly-', 'x-railway-', 'rndr-', 'x-render-', 'x-vercel-', 'x-middleware-'];
 
 // Request methods that can be retried when a pooled keep-alive socket turns out to be dead.
 const RETRYABLE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);

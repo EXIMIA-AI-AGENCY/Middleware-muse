@@ -133,6 +133,15 @@ test('API needs a session; forged, tampered or expired cookies are rejected', as
   assert.equal((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie } })).status, 401);
 });
 
+test('sessions work across instances sharing the same secrets (serverless) and die when the PIN changes', () => {
+  const a = createSessions({ secret: `${KEY}\u0000${PIN}` });
+  const b = createSessions({ secret: `${KEY}\u0000${PIN}` });
+  const other = createSessions({ secret: `${KEY}\u000087654329` });
+  const token = a.issue();
+  assert.equal(b.valid(token), true);
+  assert.equal(other.valid(token), false);
+});
+
 test('brute force: progressive global lockout, even for the right PIN', async (t) => {
   let clock = Date.now();
   const lockout = createLockout({ freeAttempts: 3, baseLockMs: 10_000, maxLockMs: 40_000, now: () => clock });
@@ -158,6 +167,28 @@ test('brute force: progressive global lockout, even for the right PIN', async (t
   const ok = await login(proxy);
   assert.equal(ok.res.status, 204);
   assert.equal(JSON.parse((await login(proxy, '7')).res.text).attemptsLeft, 2, 'success resets the counter');
+});
+
+test('logout revokes the session server-side (a copied cookie stops working)', async (t) => {
+  const { proxy } = await setup(t);
+  const { cookie } = await login(proxy);
+  assert.equal((await post(proxy, '/admin/api/key', {}, { Cookie: cookie })).status, 200);
+  assert.equal((await post(proxy, '/admin/api/logout', {}, { Cookie: cookie })).status, 204);
+  assert.equal((await post(proxy, '/admin/api/key', {}, { Cookie: cookie })).status, 401);
+  assert.equal((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie } })).status, 401);
+  // Other sessions are unaffected.
+  const other = await login(proxy);
+  assert.equal((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: other.cookie } })).status, 200);
+});
+
+test('Sec-Fetch-Site: same-origin passes even behind a Host-rewriting proxy; cross-site is refused', async (t) => {
+  const { proxy } = await setup(t);
+  const behindProxy = await post(proxy, '/admin/api/login', { pin: PIN }, { Origin: 'https://ghl-proxy.example.com', 'Sec-Fetch-Site': 'same-origin' });
+  assert.equal(behindProxy.status, 204);
+  for (const site of ['cross-site', 'same-site', 'none']) {
+    const res = await post(proxy, '/admin/api/login', { pin: PIN }, { 'Sec-Fetch-Site': site });
+    assert.equal(res.status, 403, site);
+  }
 });
 
 test('CSRF guards: JSON only and same origin', async (t) => {
@@ -243,12 +274,33 @@ test('live checks: token, proxy REST/MCP like Muse, auth, permissions and speed'
     assert.equal(seen.headers['x-admin-check'], undefined);
     assert.equal(seen.headers['x-proxy-key'], undefined);
   }
-  // The deliberate "no key" probe is not counted as an intrusion attempt.
+  // The panel's own calls neither look like intrusions nor push Muse's calls out of the list.
   const o = JSON.parse((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie } })).text);
-  assert.equal(o.metrics.unauthorized, 0);
-  assert.ok(o.metrics.recent.length > 0);
-  assert.ok(o.metrics.recent.every((s) => s.check === true));
-  assert.ok(o.metrics.last15m.overheadMs.p50 < 50, `overhead ${o.metrics.last15m.overheadMs.p50} ms`);
+  assert.equal(o.metrics.rejectedKey, 0);
+  assert.equal(o.metrics.calls, 0);
+  assert.equal(o.metrics.recent.length, 0);
+  assert.ok(o.metrics.checks.count >= 7);
+  assert.ok(o.metrics.checks.overheadMs.p50 < 50, `overhead ${o.metrics.checks.overheadMs.p50} ms`);
+});
+
+test('activity counters: rejections by cause; GHL permission denials apart; health and panel not counted as calls', async (t) => {
+  const { proxy } = await setup(t);
+  await request(`${proxy.url}/health`);
+  await request(`${proxy.url}/admin/app.css`);
+  await request(`${proxy.url}/ghl/contacts/`, { headers: { 'X-Proxy-Key': 'wrong-key' } });
+  await login(proxy, '99999999');
+  await request(`${proxy.url}/ghl/contacts/?locationId=${LOCATION}&limit=1`, { headers: { 'X-Proxy-Key': KEY } });
+  await request(`${proxy.url}/ghl/users/?locationId=${LOCATION}`, { headers: { 'X-Proxy-Key': KEY } }); // GHL: scope missing
+  const { cookie } = await login(proxy);
+  const m = JSON.parse((await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie } })).text).metrics;
+  assert.equal(m.calls, 2);
+  assert.equal(m.rejectedKey, 1);
+  assert.equal(m.rejectedPin, 1);
+  assert.equal(m.ghlDenied, 1);
+  assert.equal(m.upstreamErrors, 0);
+  assert.deepEqual(m.recent.map((r) => r.path), ['/ghl/users/', '/ghl/contacts/']);
+  assert.equal(m.last15m.count, 2);
+  assert.ok(m.last15m.overheadMs.p50 < 50);
 });
 
 test('the PIN never reaches the logs', async (t) => {
