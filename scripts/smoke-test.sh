@@ -3,6 +3,7 @@
 #
 # Uso:
 #   ./scripts/smoke-test.sh https://ghl-proxy.midominio.com [locationId]
+#   ./scripts/smoke-test.sh ghl-proxy.midominio.com            # sin esquema = https
 #
 # La llave se toma de la variable PROXY_KEY; si no existe, se pide sin eco.
 # Nunca se imprime ni se pasa como argumento de línea de comandos (no queda en `ps`).
@@ -11,6 +12,23 @@ set -euo pipefail
 BASE="${1:?uso: smoke-test.sh https://<host> [locationId]}"
 BASE="${BASE%/}"
 LOCATION_ID="${2:-${GHL_LOCATION_ID:-L3bLLVwvhdJ7A9WqkPxM}}"
+
+# A bare hostname (the CONNECTION.md format) means https.
+[[ "$BASE" == *://* ]] || BASE="https://$BASE"
+HOST="${BASE#*://}"
+HOST="${HOST%%/*}"
+
+# The key must never travel in cleartext: plain http is only allowed for local tests.
+if [[ "$BASE" != https://* ]]; then
+  case "$HOST" in
+    localhost | localhost:* | 127.* | "[::1]" | "[::1]:"*) ;;
+    *)
+      echo "Rechazado: $BASE no es https://. La llave viajaría sin cifrar." >&2
+      echo "Usa https://$HOST (http:// solo se permite contra localhost)." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 if [[ -z "${PROXY_KEY:-}" ]]; then
   if [[ -t 0 ]]; then
@@ -70,7 +88,7 @@ has_json() { # has_json <jq-filter> <grep-fallback-regex>
 }
 
 echo "ghl-proxy smoke test -> $BASE (locationId=$LOCATION_ID)"
-[[ "$BASE" == https://* ]] || echo "  AVISO: la URL no es https:// — en producción el proxy debe ir detrás de TLS."
+[[ "$BASE" == https://* ]] || echo "  AVISO: http:// sin TLS (solo válido en local)."
 
 CONTACTS="/ghl/contacts/?locationId=$LOCATION_ID&limit=1"
 
@@ -124,7 +142,7 @@ fi
 
 echo
 if [[ "$FAILURES" == 0 ]]; then
-  echo "Todo OK. Siguiente paso: ./scripts/write-connection.sh ${BASE#*://}"
+  echo "Todo OK. Siguiente paso: ./scripts/write-connection.sh ${HOST%%:*}"
 else
   echo "$FAILURES prueba(s) fallaron."
 fi

@@ -42,7 +42,7 @@ fi
 cat > "$ROOT/CONNECTION.md" <<EOF
 # CONNECTION — ghl-proxy → Muse
 
-Handoff para Muse. Sin secretos: la llave del proxy se entrega al operador por separado.
+Handoff para Muse. Sin secretos; la llave del proxy se entrega al operador por separado.
 
 \`\`\`yaml
 middleware_host: $HOST

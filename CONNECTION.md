@@ -1,7 +1,7 @@
 # CONNECTION — ghl-proxy → Muse
 
-Handoff para Muse. Sin secretos: la llave del proxy se entrega al operador por separado.
-PENDIENTE DE DEPLOY: regenerar con `./scripts/write-connection.sh <host>` (rellena `middleware_host` y `health_url`).
+Handoff para Muse. Sin secretos; la llave del proxy se entrega al operador por separado.
+PENDIENTE DE DEPLOY. Regenerar con ./scripts/write-connection.sh HOST tras el deploy (rellena middleware_host y health_url).
 
 ```yaml
 middleware_host: PENDIENTE

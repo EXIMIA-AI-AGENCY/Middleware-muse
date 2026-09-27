@@ -23,6 +23,7 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 | `GET /health` | no | `{"ok": true, "version": "1.0.0"}` |
 | `ALL /ghl/*` | `X-Proxy-Key` | Quita `/ghl` y reenvía método, path, query string (sin tocar su codificación), headers y body a `https://services.leadconnectorhq.com/<path>`. Devuelve status, headers y body del upstream tal cual. |
 | `POST /mcp/` | `X-Proxy-Key` | Reenvía el JSON-RPC a `https://services.leadconnectorhq.com/mcp/` (MCP streamable HTTP) y devuelve la respuesta en streaming (SSE). `/mcp` sin barra final funciona igual. Otros métodos (`GET`, `DELETE`…) también se reenvían y GHL decide la respuesta (hoy `405`/`404`). |
+| `TRACE /ghl/*`, `TRACE /mcp/` | `X-Proxy-Key` | `405 {"error": "method_not_allowed"}`. `TRACE` devuelve los headers recibidos, así que reenviarlo podría exponer el token de GHL inyectado. |
 | cualquier otra | `X-Proxy-Key` | `404 {"error": "not_found"}` |
 
 **Autenticación:** todo request, excepto `/health`, debe traer
@@ -50,6 +51,13 @@ La respuesta de GHL vuelve sin cambios (status, headers como `Set-Cookie` o
 hop-by-hop. En respuestas SSE se añade `X-Accel-Buffering: no` para que un
 nginx intermedio no las acumule en buffer.
 
+Si GHL responde antes de recibir todo el body de un upload (p. ej. `401` o
+`413`), el proxy entrega esa respuesta y descarta el resto del body.
+Limitación conocida: si además GHL cierra la conexión sin leer el body, en
+uploads de más de ~1 MB el cliente HTTP de Node puede perder esa respuesta
+temprana y el proxy devuelve `502`. Las llamadas JSON normales no se ven
+afectadas.
+
 ### Errores propios del proxy
 
 Todos en JSON y con `Cache-Control: no-store`. Cualquier otro status o body viene de GHL.
@@ -59,8 +67,9 @@ Todos en JSON y con `Cache-Control: no-store`. Cualquier otro status o body vien
 | 401 | `{"error":"unauthorized"}` | Falta `X-Proxy-Key` o es incorrecta. Un 401 **de GHL** trae otro body, p. ej. `{"statusCode":401,"message":"Invalid Private Integration token"}`, y significa que `GHL_TOKEN` es inválido o fue rotado. |
 | 429 | `{"error":"rate_limited"}` + `Retry-After` | Se superó el rate limit del proxy. |
 | 400 | `{"error":"bad_request"}` | Request-target que no empieza por `/`. |
+| 405 | `{"error":"method_not_allowed"}` | Método `TRACE`. |
 | 404 | `{"error":"not_found"}` | Ruta que no es `/health`, `/ghl/*` ni `/mcp/`. |
-| 502 | `{"error":"bad_gateway"}` | No se pudo conectar con GHL. |
+| 502 | `{"error":"bad_gateway"}` | No se pudo conectar con GHL, GHL cerró la conexión sin responder o envió una respuesta HTTP inválida. |
 | 504 | `{"error":"upstream_timeout"}` | GHL no respondió en `UPSTREAM_TIMEOUT_MS`. |
 
 ---
@@ -115,8 +124,16 @@ editar después sin regenerar el token.
   path, query o header del cliente puede redirigir el token a otro host.
 - **Contenedor:** usuario sin privilegios (`node`), `NODE_ENV=production`,
   solo dependencias de producción.
-- **Rotar la llave del proxy:** genera una nueva, actualiza `PROXY_KEY` en la
-  plataforma (se redepliega sola) y entrega la nueva llave a Muse por el canal
+- **Rotar la llave del proxy** (o el token de GHL): genera la nueva y actualiza
+  la variable. El cambio **no** se aplica solo en todas las plataformas:
+  - Railway: los cambios de variables quedan *staged*; pulsa **Deploy**.
+  - Render: guarda con *Save and deploy*.
+  - Fly.io: `fly secrets import < .env` redepliega solo.
+  - VPS: edita `.env` y ejecuta `docker compose up -d` desde `deploy/vps`
+    (`docker compose restart` no relee el `env_file`).
+
+  Comprueba con `./scripts/smoke-test.sh https://<host>` que la llave nueva da
+  200 y la vieja 401. Solo entonces entrega la nueva llave a Muse por el canal
   seguro.
 
 ---
@@ -145,14 +162,17 @@ docker run --rm -p 8080:8080 --env-file .env ghl-proxy
 npm test
 ```
 
-Son 34 tests con `node:test`, sin dependencias extra, contra un GHL simulado.
+Son 38 tests con `node:test`, sin dependencias extra, contra un GHL simulado.
 Cubren arranque sin variables, `/health`, 401 en todas sus variantes, que la
 llave nunca llegue a GHL, inyección y sobrescritura de headers, headers de
 plataforma eliminados, path y query intactos, bodies (incluido chunked),
 status/headers/body del upstream sin cambios (`Set-Cookie` múltiple, gzip),
 HEAD/204, handshake MCP completo, SSE en streaming real, rate limit con
-`Retry-After`, 502/504, cancelación al desconectarse el cliente, reintento en
-socket keep-alive caído y logs sin query, headers, bodies ni secretos.
+`Retry-After`, 502/504, `TRACE` rechazado, respuestas de upstream malformadas
+sin tumbar el proceso, respuesta temprana de GHL durante un upload grande,
+cancelación al desconectarse el cliente, reintento en socket keep-alive caído,
+apagado limpio con conexiones keep-alive y logs sin query, headers, bodies ni
+secretos.
 
 ### Prueba de aceptación contra el deploy
 
@@ -161,7 +181,9 @@ socket keep-alive caído y logs sin query, headers, bodies ni secretos.
 # pide PROXY_KEY sin eco (o la toma de la variable de entorno PROXY_KEY)
 ```
 
-Comprueba los criterios de aceptación: `/health` → `{"ok": true, ...}`;
+Si pasas el host sin esquema, usa `https://`. Se niega a enviar la llave por
+`http://` salvo contra `localhost`/`127.0.0.1`. Comprueba los criterios de
+aceptación: `/health` → `{"ok": true, ...}`;
 `GET /ghl/contacts/?locationId=L3bLLVwvhdJ7A9WqkPxM&limit=1` con llave → `200`
 con contactos; sin llave y con llave incorrecta → `401`; `POST /mcp/` sin llave
 → `401`; `initialize` → JSON-RPC válido; `notifications/initialized` → `202`;
@@ -213,6 +235,10 @@ Los planes Free/Trial paran el servicio cuando se acaba el crédito.
    - *Restart Policy*: `Always`.
    - *Serverless*: **apagado** (es el default; si se enciende, el servicio
      se duerme y la primera llamada da 502).
+   - Añade la variable `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=15`. Por defecto
+     Railway mata el deploy anterior 0 s después del SIGTERM y corta las
+     llamadas en curso. Con 15 s, el apagado limpio del proxy (hasta 10 s)
+     alcanza a terminarlas.
 4. **Settings → Networking → Generate Domain** → `xxxx.up.railway.app`, con
    TLS automático. Para un dominio propio (p. ej. `ghl-proxy.eximia.agency`):
    *Custom Domain* y crea en tu DNS el `CNAME` y el `TXT` de verificación que
@@ -272,10 +298,14 @@ Edita `fly.toml` para que nunca se apague:
 ```
 
 ```bash
-fly secrets set GHL_TOKEN=... PROXY_KEY=...   # o: fly secrets import < .env
+cp .env.example .env && chmod 600 .env       # rellena GHL_TOKEN y PROXY_KEY
+fly secrets import < .env                    # los secretos no quedan en el historial de la shell
 fly deploy --ha=false
 fly certs add ghl-proxy.midominio.com        # opcional, dominio propio
 ```
+
+No uses `fly secrets set GHL_TOKEN=...`: el valor quedaría en el historial de
+la shell y en la lista de procesos.
 
 `fly launch` escribe por defecto `auto_stop_machines = "stop"` y
 `min_machines_running = 0`, lo que apaga la máquina. Hay que cambiarlo como
@@ -346,6 +376,12 @@ Comportamiento real de GHL, verificado contra `services.leadconnectorhq.com`:
   `401 version header was not found.`
 - **`GET /contacts/` está deprecado** (sigue funcionando con `2021-07-28`). A
   largo plazo, usa `POST /contacts/search`.
+- **Paginación:** no sigas `meta.nextPageUrl` tal cual. Apunta directo a
+  `services.leadconnectorhq.com`, donde Muse no tiene token y `urllib` recibe
+  el error 1010. Reconstruye la URL como
+  `https://<middleware_host>/ghl/<path>?...&startAfter=...&startAfterId=...`,
+  o cambia `https://services.leadconnectorhq.com` por
+  `https://<middleware_host>/ghl`.
 - **MCP de GHL:** no guarda estado (no emite `Mcp-Session-Id`; `initialize` es
   opcional). Toda respuesta exitosa llega como `text/event-stream`
   (`event: message` + `data: {json-rpc}`), así que siempre hay que parsear SSE.
@@ -370,6 +406,7 @@ src/
   proxy.js       reenvío en streaming (headers, body, errores, reintento keep-alive)
   config.js      variables de entorno y validación
   auth.js        X-Proxy-Key en tiempo constante
+  http-util.js   respuestas JSON propias del proxy (sendJson)
   rate-limit.js  ventana deslizante en memoria
   logger.js      logs JSON: method, path, status, ms
 test/            node:test + GHL simulado

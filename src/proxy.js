@@ -39,6 +39,11 @@ const DROP_REQUEST_PREFIXES = ['x-forwarded-', 'cf-', 'fly-', 'x-railway-', 'rnd
 // Request methods that can be retried when a pooled keep-alive socket turns out to be dead.
 const RETRYABLE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+// Characters Node accepts in a status reason phrase (same rule as for header values).
+const VALID_REASON = /^[\t\x20-\x7e\x80-\xff]*$/;
+
+const upstreamError = (code, message) => Object.assign(new Error(message), { code });
+
 function connectionTokens(headers) {
   const value = headers.connection;
   if (!value) return new Set();
@@ -132,6 +137,10 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
   return function forward(req, res) {
     // Origin-form only ("/path?query"). The upstream host is fixed either way.
     if (!req.url.startsWith('/')) return sendJson(res, 400, { error: 'bad_request' });
+    // TRACE echoes the request headers back, which would include the injected GHL token.
+    if (req.method === 'TRACE') {
+      return sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS' });
+    }
 
     const path = `${pathPrefix}${req.url}`;
     const headers = buildUpstreamHeaders(req, config, kind);
@@ -140,11 +149,22 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
       headers['transfer-encoding'] !== undefined;
 
     let upstreamReq = null;
+    let gotResponse = false;
     let finished = false;
+
+    // When the upstream exchange ends before the client finished uploading (early
+    // response or error), discard the rest of the body so the client can read our answer.
+    const drainRequest = () => {
+      if (!req.complete) {
+        req.unpipe();
+        req.resume();
+      }
+    };
 
     const fail = (err) => {
       if (finished) return;
       finished = true;
+      drainRequest();
       const timedOut = err && err.code === 'UPSTREAM_TIMEOUT';
       logger.error({
         msg: timedOut ? 'upstream_timeout' : 'upstream_error',
@@ -153,10 +173,41 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         path: loggablePath(req.originalUrl),
       });
       if (!res.headersSent) {
+        // Drop any upstream headers already copied (e.g. Content-Encoding) before answering ourselves.
+        for (const name of res.getHeaderNames()) res.removeHeader(name);
         sendJson(res, timedOut ? 504 : 502, { error: timedOut ? 'upstream_timeout' : 'bad_gateway' });
       } else {
         res.destroy();
       }
+    };
+
+    const relay = (upstreamRes, outgoing) => {
+      const { statusCode, statusMessage } = upstreamRes;
+      if (!(statusCode >= 200 && statusCode <= 599)) {
+        throw upstreamError('UPSTREAM_BAD_STATUS', 'invalid upstream status code');
+      }
+      copyResponseHeaders(upstreamRes, res);
+      const isStream = /text\/event-stream/i.test(upstreamRes.headers['content-type'] ?? '');
+      // Keep reverse proxies such as nginx from buffering SSE (MCP streamable HTTP).
+      if (isStream) res.setHeader('X-Accel-Buffering', 'no');
+      if (typeof statusMessage === 'string' && VALID_REASON.test(statusMessage)) {
+        res.writeHead(statusCode, statusMessage);
+      } else {
+        res.writeHead(statusCode);
+      }
+      if (isStream) res.flushHeaders();
+
+      upstreamRes.on('error', (err) => fail(err));
+      upstreamRes.on('end', () => {
+        finished = true;
+        // GHL answered before the upload finished (e.g. 401/413): the exchange is over,
+        // so stop forwarding the body and discard the rest (RFC 9112 §9.3).
+        if (!req.complete) {
+          outgoing.destroy();
+          drainRequest();
+        }
+      });
+      upstreamRes.pipe(res);
     };
 
     const send = (attempt) => {
@@ -173,7 +224,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
       upstreamReq = outgoing;
 
       outgoing.on('timeout', () => {
-        outgoing.destroy(Object.assign(new Error('upstream timeout'), { code: 'UPSTREAM_TIMEOUT' }));
+        outgoing.destroy(upstreamError('UPSTREAM_TIMEOUT', 'upstream timeout'));
       });
 
       outgoing.on('error', (err) => {
@@ -196,18 +247,21 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
 
       outgoing.on('response', (upstreamRes) => {
         if (upstreamReq !== outgoing) return;
-        copyResponseHeaders(upstreamRes, res);
-        const isStream = /text\/event-stream/i.test(upstreamRes.headers['content-type'] ?? '');
-        // Keep reverse proxies such as nginx from buffering SSE (MCP streamable HTTP).
-        if (isStream) res.setHeader('X-Accel-Buffering', 'no');
-        res.writeHead(upstreamRes.statusCode, upstreamRes.statusMessage);
-        if (isStream) res.flushHeaders();
+        gotResponse = true;
+        try {
+          relay(upstreamRes, outgoing);
+        } catch (err) {
+          // A malformed upstream response must fail this request, not crash the process.
+          upstreamRes.destroy();
+          fail(err);
+        }
+      });
 
-        upstreamRes.on('error', (err) => fail(err));
-        upstreamRes.on('end', () => {
-          finished = true;
-        });
-        upstreamRes.pipe(res);
+      // Covers the socket closing with neither a response nor an error (e.g. an unexpected 101).
+      outgoing.on('close', () => {
+        if (upstreamReq !== outgoing) return;
+        if (!gotResponse) fail(upstreamError('UPSTREAM_CLOSED', 'upstream closed without a response'));
+        drainRequest();
       });
 
       if (attempt === 0 && hasBody) {

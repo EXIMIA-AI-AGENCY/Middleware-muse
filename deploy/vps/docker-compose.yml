@@ -1,10 +1,11 @@
 # ghl-proxy en un VPS con TLS automático (Let's Encrypt) vía Caddy.
 #
 #   cd deploy/vps
-#   cp ../../.env.example ../../.env   # rellena GHL_TOKEN y PROXY_KEY
+#   cp ../../.env.example ../../.env && chmod 600 ../../.env   # rellena GHL_TOKEN y PROXY_KEY
 #   PROXY_DOMAIN=ghl-proxy.midominio.com docker compose up -d --build
 #
 # Solo Caddy publica puertos (80/443). El proxy no es accesible por HTTP plano desde fuera.
+# Tras cambiar .env, aplica con `docker compose up -d` (un simple `restart` no relee el env_file).
 services:
   ghl-proxy:
     build: ../..

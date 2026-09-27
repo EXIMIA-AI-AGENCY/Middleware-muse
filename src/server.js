@@ -16,8 +16,14 @@ try {
   process.exit(1);
 }
 
+let shuttingDown = false;
+
 const app = createApp(config, logger);
 const server = http.createServer(app);
+// During shutdown, answer on any connection and then close it, so no new work lands here.
+server.prependListener('request', (req, res) => {
+  if (shuttingDown) res.setHeader('Connection', 'close');
+});
 // Outlive the idle timeout of platform load balancers (typically 60 s) to avoid spurious 502s.
 server.keepAliveTimeout = 65_000;
 server.headersTimeout = 66_000;
@@ -37,7 +43,6 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-let shuttingDown = false;
 function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -45,6 +50,8 @@ function shutdown(signal) {
   app.locals.limiter.stop();
   server.close(() => process.exit(0));
   server.closeIdleConnections();
+  // Keep-alive connections that were busy become idle as their responses finish.
+  setInterval(() => server.closeIdleConnections(), 250).unref();
   // Long-lived MCP streams must not block a redeploy forever.
   setTimeout(() => process.exit(0), 10_000).unref();
 }

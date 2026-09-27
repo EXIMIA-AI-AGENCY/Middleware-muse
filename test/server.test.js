@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
+const http = require('node:http');
 const { TOKEN, KEY, startUpstream, request } = require('./helpers');
 
 const SERVER = path.join(__dirname, '..', 'src', 'server.js');
@@ -63,4 +64,36 @@ test('starts, serves traffic, never logs secrets, exits cleanly on SIGTERM', asy
   assert.ok(!out.includes(TOKEN), 'GHL token leaked to logs');
   assert.ok(!out.includes(KEY), 'proxy key leaked to logs');
   for (const line of out.trim().split('\n')) JSON.parse(line); // every line is JSON
+});
+
+test('SIGTERM lets in-flight requests finish, closes keep-alive connections and exits promptly', async (t) => {
+  const upstream = await startUpstream((req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"slow":true}');
+    }, 500);
+  });
+  t.after(() => upstream.close());
+  const port = await freePort();
+  const proc = run({ GHL_TOKEN: TOKEN, PROXY_KEY: KEY, PORT: String(port), GHL_BASE_URL: upstream.url });
+  t.after(() => proc.child.kill('SIGKILL'));
+  await waitFor(() => proc.output().includes('"listening"'));
+
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const inFlight = new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/ghl/slow', agent, headers: { 'X-Proxy-Key': KEY } }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res));
+    });
+    req.on('error', reject);
+  });
+  await waitFor(() => upstream.requests.length === 1);
+  const signalledAt = Date.now();
+  proc.child.kill('SIGTERM');
+
+  const res = await inFlight;
+  assert.equal(res.statusCode, 200);
+  assert.equal(await proc.exited, 0);
+  assert.ok(Date.now() - signalledAt < 3000, `exit took ${Date.now() - signalledAt} ms`);
 });

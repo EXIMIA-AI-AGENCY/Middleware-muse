@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const net = require('node:net');
 const zlib = require('node:zlib');
 const { TOKEN, KEY, startUpstream, startProxy, request, authed, waitForLog, listen, close } = require('./helpers');
 
@@ -261,6 +262,100 @@ test('absolute-form request targets are rejected', async (t) => {
   const res = await request(proxy.url, { path: 'http://evil.example/ghl/contacts/', headers: authed() });
   assert.ok([400, 404].includes(res.status), String(res.status));
   assert.equal(upstream.requests.length, 0);
+});
+
+test('TRACE is refused so the injected token can never be echoed back', async (t) => {
+  const { proxy, upstream } = await setup(t);
+  for (const path of ['/ghl/contacts/', '/mcp/']) {
+    const res = await request(`${proxy.url}${path}`, { method: 'TRACE', headers: authed() });
+    assert.equal(res.status, 405, path);
+    assert.deepEqual(JSON.parse(res.text), { error: 'method_not_allowed' });
+    assert.match(res.headers.allow, /POST/);
+  }
+  assert.equal(upstream.requests.length, 0);
+});
+
+/** Upstream that answers every connection with raw bytes (to emulate broken peers). */
+async function rawUpstream(t, reply) {
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('data', () => socket.end(reply));
+    socket.on('error', () => {});
+  });
+  const url = await listen(server);
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise((resolve) => server.close(() => resolve()));
+  });
+  return url;
+}
+
+test('malformed upstream status lines fail the request, not the process', async (t) => {
+  const cases = [
+    { raw: 'HTTP/1.1 200 O\x01K\r\nContent-Length: 2\r\n\r\nok', status: 200, body: 'ok' },
+    { raw: 'HTTP/1.1 201 \x7f\r\nContent-Length: 0\r\n\r\n', status: 201, body: '' },
+    { raw: 'HTTP/1.1 099 Weird\r\nContent-Length: 0\r\n\r\n', status: 502 },
+    { raw: 'HTTP/1.1 000 Zero\r\nContent-Length: 0\r\n\r\n', status: 502 },
+    { raw: 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n', status: 502 },
+  ];
+  for (const c of cases) {
+    const url = await rawUpstream(t, c.raw);
+    const proxy = await startProxy(url, { UPSTREAM_TIMEOUT_MS: '5000' });
+    t.after(() => proxy.close());
+    const started = Date.now();
+    const res = await request(`${proxy.url}/ghl/x`, { headers: authed() });
+    assert.equal(res.status, c.status, JSON.stringify(c.raw));
+    if (c.body !== undefined) assert.equal(res.text, c.body);
+    if (c.status === 502) assert.deepEqual(JSON.parse(res.text), { error: 'bad_gateway' });
+    assert.ok(Date.now() - started < 2000, 'answered promptly');
+    // Still serving afterwards.
+    assert.equal((await request(`${proxy.url}/health`)).status, 200);
+  }
+});
+
+test('early upstream answer during a large upload: client gets it and the upload is drained', async (t) => {
+  const upstream = http.createServer((req, res) => {
+    // Answer without waiting for the body, as GHL does for 401/413 on uploads.
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end('{"statusCode":401,"message":"Invalid Private Integration token"}');
+  });
+  const upstreamUrl = await listen(upstream);
+  t.after(() => close(upstream));
+  const proxy = await startProxy(upstreamUrl);
+  t.after(() => proxy.close());
+
+  const body = Buffer.alloc(20 * 1024 * 1024, 'a');
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const started = Date.now();
+  const outcome = await new Promise((resolve, reject) => {
+    let status;
+    let sent = false;
+    let received = false;
+    const done = () => sent && received && resolve({ status, ms: Date.now() - started });
+    const target = new URL(`${proxy.url}/ghl/medias/upload-file`);
+    const req = http.request(
+      { hostname: target.hostname, port: target.port, path: target.pathname, method: 'POST', agent, headers: authed({ 'Content-Type': 'application/octet-stream', 'Content-Length': body.length }) },
+      (res) => {
+        status = res.statusCode;
+        res.resume();
+        res.on('end', () => {
+          received = true;
+          done();
+        });
+      },
+    );
+    // 'finish' only fires once the proxy has read the whole body; a stalled proxy never gets here.
+    req.on('finish', () => {
+      sent = true;
+      done();
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+  assert.equal(outcome.status, 401);
+  assert.ok(outcome.ms < 4000, `took ${outcome.ms} ms`);
 });
 
 test('rate limit: 429 with Retry-After once the per-key budget is spent', async (t) => {
