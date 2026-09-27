@@ -496,7 +496,7 @@ Comportamiento real de GHL, verificado contra `services.leadconnectorhq.com`:
 ```
 src/
   server.js      arranque, timeouts, apagado limpio (SIGTERM)
-  app.js         rutas: /health, auth, rate limit, /ghl, /mcp
+  create-app.js  rutas: /health, auth, rate limit, /ghl, /mcp
   proxy.js       reenvío en streaming (headers, body, errores, reintento keep-alive)
   config.js      variables de entorno y validación
   auth.js        X-Proxy-Key en tiempo constante

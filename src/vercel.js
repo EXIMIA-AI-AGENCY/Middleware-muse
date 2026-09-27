@@ -2,7 +2,7 @@
 
 // Vercel entrypoint: Vercel runs the exported Express app as a function (no listen()).
 // Docker/VPS/Railway use src/server.js instead.
-const { createApp } = require('./app');
+const { createApp } = require('./create-app');
 const { loadConfig } = require('./config');
 const { createLogger } = require('./logger');
 

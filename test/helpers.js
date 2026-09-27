@@ -1,7 +1,7 @@
 'use strict';
 
 const http = require('node:http');
-const { createApp } = require('../src/app');
+const { createApp } = require('../src/create-app');
 const { loadConfig } = require('../src/config');
 
 const TOKEN = 'pit-test-ghl-token-0123456789abcdef';

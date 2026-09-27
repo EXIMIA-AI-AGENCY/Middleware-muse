@@ -1,7 +1,7 @@
 'use strict';
 
 const http = require('node:http');
-const { createApp } = require('./app');
+const { createApp } = require('./create-app');
 const { loadConfig } = require('./config');
 const { createLogger } = require('./logger');
 
