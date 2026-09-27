@@ -72,6 +72,47 @@
         <ul id="checks" class="checklist" aria-live="polite"></ul>
       </section>
 
+      <!-- Conectar Muse -->
+      <section class="card card-wide card-connect" aria-labelledby="connect-title">
+        <h2 id="connect-title">Conectar Muse</h2>
+        <ol class="steps">
+          <li>
+            <h3>Copia este mensaje y pégalo en Muse</h3>
+            <p class="muted small">Tiene todo lo que Muse necesita para conectarse sola: datos, pasos, cómo verificar y reglas del API. No contiene ningún secreto.</p>
+            <div class="actions">
+              <button type="button" class="btn btn-primary btn-wide" id="copy-muse">Copiar mensaje para Muse</button>
+            </div>
+            <details class="preview">
+              <summary>Ver el mensaje</summary>
+              <pre id="muse-message" class="code code-scroll" tabindex="0">—</pre>
+            </details>
+          </li>
+          <li>
+            <h3>Cuando Muse te pida la llave, pégala en su tarjeta segura</h3>
+            <p class="muted small">Es lo único que tienes que poner tú. Pégala solo en la tarjeta segura de Muse: nunca en el chat ni en un correo.</p>
+            <div class="secret">
+              <code id="proxy-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn" id="reveal-key">Mostrar</button>
+              <button type="button" class="btn" id="copy-key">Copiar llave</button>
+            </div>
+          </li>
+          <li>
+            <h3>Muse verifica sola</h3>
+            <p class="muted small">Muse comprobará <code id="health-url">/health</code> y hará llamadas de prueba. Las verás aparecer abajo, en <strong>Actividad reciente</strong>.</p>
+          </li>
+        </ol>
+        <details class="preview">
+          <summary>Solo los datos de conexión (CONNECTION.md)</summary>
+          <pre id="connection" class="code" tabindex="0">—</pre>
+          <div class="actions">
+            <button type="button" class="btn" id="copy-connection">Copiar</button>
+            <button type="button" class="btn btn-ghost" id="download-connection">Descargar</button>
+          </div>
+        </details>
+      </section>
+
       <!-- Velocidad -->
       <section class="card card-speed" aria-labelledby="speed-title">
         <h2 id="speed-title">Velocidad</h2>
@@ -83,37 +124,6 @@
         <p class="muted small" id="speed-note">La misma llamada a GoHighLevel, directa y por la dirección pública del proxy, 5 veces cada una (valor típico).</p>
         <p class="kv-title small" id="traffic-title"></p>
         <dl class="kv" id="traffic"></dl>
-      </section>
-
-      <!-- Conectar Muse -->
-      <section class="card card-wide card-connect" aria-labelledby="connect-title">
-        <h2 id="connect-title">Conectar Muse</h2>
-        <ol class="steps">
-          <li>
-            <h3>Datos de conexión <span class="muted">(CONNECTION.md)</span></h3>
-            <p class="muted small">Sin secretos. Entrégalos a Muse tal cual.</p>
-            <pre id="connection" class="code" tabindex="0">—</pre>
-            <div class="actions">
-              <button type="button" class="btn" id="copy-connection">Copiar</button>
-              <button type="button" class="btn btn-ghost" id="download-connection">Descargar</button>
-            </div>
-          </li>
-          <li>
-            <h3>Llave del proxy</h3>
-            <p class="muted small">Muse la pide en su tarjeta segura de credenciales. Pégala solo ahí: nunca en un chat ni en un correo.</p>
-            <div class="secret">
-              <code id="proxy-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
-            </div>
-            <div class="actions">
-              <button type="button" class="btn" id="reveal-key">Mostrar</button>
-              <button type="button" class="btn" id="copy-key">Copiar llave</button>
-            </div>
-          </li>
-          <li>
-            <h3>Muse verifica</h3>
-            <p class="muted small">Muse comprobará <code id="health-url">/health</code> y hará una llamada de prueba a los contactos. Si arriba dice <strong>Todo funciona</strong>, ya puede usar el proxy.</p>
-          </li>
-        </ol>
       </section>
 
       <!-- Permisos -->

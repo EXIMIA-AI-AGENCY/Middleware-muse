@@ -151,6 +151,63 @@ function connectionMarkdown(info) {
   );
 }
 
+/**
+ * Ready-to-paste instructions for Muse: everything it needs to connect, and no secret.
+ * The proxy key is requested through Muse's secure credential card, never in the chat.
+ */
+function museMessage(info, config) {
+  const host = info.middleware_host;
+  const base = `https://${host}`;
+  const loc = info.ghl_location_id;
+  return `# Conectar GoHighLevel (subcuenta Eximia) a través de ghl-proxy
+
+Hola Muse. El conector directo de GoHighLevel no funciona, así que vamos a usar nuestro proxy propio. Aquí está todo lo que necesitas. Este mensaje no contiene secretos: la llave del proxy te la daré por tu tarjeta segura de credenciales, nunca por el chat.
+
+## Datos de conexión (CONNECTION.md)
+
+\`\`\`yaml
+${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
+\`\`\`
+
+## Qué hacer
+
+1. Registra el conector \`custom.gohighlevel-proxy\` con \`api_hosts=["${host}"]\` usando tu flujo seguro de credenciales. Pídeme la llave del proxy en la tarjeta segura. Guárdala como secreto y envíala SIEMPRE en el header \`X-Proxy-Key\`. Nunca la muestres ni la escribas en el chat, en logs ni en archivos.
+2. Adapta tu skill de GoHighLevel (\`~/workspace/skills/gohighlevel/\`) con un cliente gemelo \`bin/ghl-proxy\`:
+   - REST: \`${base}${info.rest_base_path}/<ruta>\`, donde <ruta> es exactamente la del API v2 de GHL (lo que iría después de https://services.leadconnectorhq.com), con la misma query.
+   - MCP: \`POST ${base}${info.mcp_path}\`.
+   - No envíes el token de GoHighLevel ni el header Authorization: el proxy los pone. Tampoco hace falta un User-Agent especial.
+3. Verifica, en este orden:
+   a. \`GET ${info.health_url}\` → \`{"ok": true, ...}\`
+   b. \`GET ${base}${info.rest_base_path}/contacts/?locationId=${loc}&limit=1\` con \`X-Proxy-Key\` → 200 con \`"contacts"\`.
+   c. MCP: \`initialize\` → \`tools/list\` (unas 36 herramientas) → \`tools/call\` de \`locations_get-location\` → \`result.isError\` debe ser false.
+4. Si todo da 200, pasa tus automatizaciones (revisión diaria del CRM, greeter de leads, prospección) al proxy y déjalo como vía principal hasta que el conector directo vuelva a funcionar.
+5. Confírmame en una línea que quedó conectado.
+
+## Reglas del API de GoHighLevel
+
+- Header \`Version\`: si no lo envías, el proxy pone \`${config.ghlVersion}\` (contacts, locations, opportunities, users, workflows, custom-fields…). Para calendars y conversations (incluido \`/conversations/search\`) envía \`Version: 2021-04-15\`.
+- \`GET /contacts/\` está deprecado: para buscar usa \`POST ${info.rest_base_path}/contacts/search\` con \`{"locationId": "${loc}", ...}\`.
+- Paginación: no sigas \`meta.nextPageUrl\` tal cual, porque apunta directo a GHL. Cambia \`https://services.leadconnectorhq.com\` por \`${base}${info.rest_base_path}\`, o usa \`startAfter\` / \`startAfterId\`.
+- Límites: GHL permite 100 llamadas cada 10 s y 200 000 al día; el proxy, ${config.rateLimitMax} cada ${config.rateLimitWindowMs / 1000} s. Si recibes 429, espera lo que indique \`Retry-After\`.
+- Reutiliza la conexión HTTPS (keep-alive o sesión persistente): cada llamada va más rápido.
+
+## MCP (streamable HTTP)
+
+- Envía \`Content-Type: application/json\` y \`Accept: application/json, text/event-stream\` (si faltan, el proxy los corrige).
+- No guarda estado: no hay \`Mcp-Session-Id\` y \`initialize\` es opcional.
+- Las respuestas llegan como SSE (\`event: message\` y \`data: {json-rpc}\`): lee la línea \`data:\`.
+- Un error de GHL dentro de \`tools/call\` llega como HTTP 200 con \`result.isError = true\` y el detalle en \`content[0].text\`.
+- Los argumentos de las herramientas usan los prefijos \`path_\`, \`query_\` y \`body_\` (p. ej. \`path_contactId\`). Usa los nombres exactos de \`tools/list\`.
+
+## Si algo falla
+
+- 401 \`{"error":"unauthorized"}\`: la llave del proxy falta o es incorrecta. Pídemela otra vez por la tarjeta segura.
+- 401 de GHL (p. ej. "Invalid Private Integration token"): avísame, hay que actualizar el token en el proxy.
+- 403 \`error code: 1010\`: no debería pasar a través del proxy. Si pasa, avísame.
+- 429: espera \`Retry-After\`. 502/504: GHL no respondió; reintenta en unos minutos.
+`;
+}
+
 /** Small HTTP client for the diagnostics (never used for proxied traffic). */
 function createClient() {
   const agents = { 'http:': new http.Agent({ keepAlive: true }), 'https:': new https.Agent({ keepAlive: true }) };
@@ -431,6 +488,7 @@ function createAdminRouter({
       https: isHttps(req),
       connection: info,
       connectionMarkdown: connectionMarkdown(info),
+      museMessage: museMessage(info, config),
       config: {
         ghlTokenHint: `${config.ghlToken.startsWith('pit-') ? 'pit-' : ''}…${config.ghlToken.slice(-4)}`,
         proxyKeyLength: config.proxyKey.length,
@@ -470,4 +528,4 @@ function createAdminRouter({
   return router;
 }
 
-module.exports = { createAdminRouter, createLockout, createSessions, connectionInfo, connectionMarkdown, publicHost };
+module.exports = { createAdminRouter, createLockout, createSessions, connectionInfo, connectionMarkdown, museMessage, publicHost };

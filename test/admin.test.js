@@ -229,6 +229,16 @@ test('overview and CONNECTION.md: exact handoff fields, no secrets', async (t) =
   assert.match(md.text, /^middleware_host: ghl-proxy\.eximia\.agency$/m);
   for (const secret of [TOKEN, KEY, PIN]) assert.ok(!md.text.includes(secret));
 
+  // The copy-paste message for Muse: complete, with the real host, and no secret.
+  assert.match(o.museMessage, /custom\.gohighlevel-proxy/);
+  assert.match(o.museMessage, /api_hosts=\["ghl-proxy\.eximia\.agency"\]/);
+  assert.match(o.museMessage, /X-Proxy-Key/);
+  assert.match(o.museMessage, /https:\/\/ghl-proxy\.eximia\.agency\/ghl\/contacts\/\?locationId=L3bLLVwvhdJ7A9WqkPxM&limit=1/);
+  assert.match(o.museMessage, /POST https:\/\/ghl-proxy\.eximia\.agency\/mcp\//);
+  assert.match(o.museMessage, /tarjeta segura/);
+  assert.match(o.museMessage, /middleware_host: ghl-proxy\.eximia\.agency/);
+  for (const secret of [TOKEN, KEY, PIN]) assert.ok(!o.museMessage.includes(secret), 'Muse message leaks a secret');
+
   // A hostile Host header cannot inject content into the handoff.
   const evil = await request(`${proxy.url}/admin/api/overview`, { headers: { Cookie: cookie, 'X-Forwarded-Host': 'evil.example/`<script>"x' } });
   assert.equal(JSON.parse(evil.text).connection.middleware_host, 'PENDIENTE');

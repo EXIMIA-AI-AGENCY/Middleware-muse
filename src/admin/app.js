@@ -336,6 +336,7 @@
     $('host-label').textContent = o.connection.middleware_host;
     $('connection').textContent = o.connectionMarkdown.replace(/^[\s\S]*?```yaml\n|```\s*$/g, '').trim();
     $('connection').dataset.markdown = o.connectionMarkdown;
+    $('muse-message').textContent = o.museMessage;
     $('health-url').textContent = o.connection.health_url;
 
     const m = o.metrics;
@@ -529,6 +530,17 @@
       }
     });
     $('download-connection').addEventListener('click', download);
+    $('copy-muse').addEventListener('click', async () => {
+      const text = $('muse-message').textContent;
+      if (!text || text === '—') return toast('Espera un segundo: el mensaje aún se está cargando.', { error: true });
+      if (await copyText(text)) {
+        toast('Mensaje copiado. Pégalo en Muse.');
+      } else {
+        $('muse-message').closest('details').open = true;
+        selectNode($('muse-message'));
+        toast('Tu navegador no dejó copiar. El mensaje está seleccionado: mantén pulsado para copiarlo.', { error: true });
+      }
+    });
     $('reveal-key').addEventListener('click', async () => {
       if ($('proxy-key').classList.contains('is-revealed')) return hideKey();
       try {
