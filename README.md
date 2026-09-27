@@ -13,6 +13,10 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
   sentidos (sirve para el SSE del MCP) y el cuerpo del upstream pasa byte a byte,
   sin recomprimir ni reinterpretar.
 - **Versión:** 1.0.0.
+- **Panel del operador** en `https://<host>/admin` (con PIN): estado en vivo,
+  velocidad, permisos del token y los datos para conectar Muse, listos para
+  copiar. Ver [Panel del operador](#panel-del-operador).
+- **Velocidad:** el proxy añade menos de 1 ms. Ver [Velocidad](#velocidad).
 
 ---
 
@@ -24,9 +28,11 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 | `ALL /ghl/*` | `X-Proxy-Key` | Quita `/ghl` y reenvía método, path, query string (sin tocar su codificación), headers y body a `https://services.leadconnectorhq.com/<path>`. Devuelve status, headers y body del upstream tal cual. |
 | `POST /mcp/` | `X-Proxy-Key` | Reenvía el JSON-RPC a `https://services.leadconnectorhq.com/mcp/` (MCP streamable HTTP) y devuelve la respuesta en streaming (SSE). `/mcp` sin barra final funciona igual. Otros métodos (`GET`, `DELETE`…) también se reenvían y GHL decide la respuesta (hoy `405`/`404`). |
 | `TRACE /ghl/*`, `TRACE /mcp/` | `X-Proxy-Key` | `405 {"error": "method_not_allowed"}`. `TRACE` devuelve los headers recibidos, así que reenviarlo podría exponer el token de GHL inyectado. |
+| `/admin`, `GET /` | PIN (sesión) | Panel del operador. Solo existe si `ADMIN_PIN` está definido; `GET /` redirige a `/admin`. Sin `ADMIN_PIN`, estas rutas responden `401` como cualquier otra. |
 | cualquier otra | `X-Proxy-Key` | `404 {"error": "not_found"}` |
 
-**Autenticación:** todo request, excepto `/health`, debe traer
+**Autenticación:** todo request, excepto `/health` (y el panel `/admin`, que
+usa su propio PIN), debe traer
 `X-Proxy-Key: <PROXY_KEY>`. Si falta o no coincide, la respuesta es `401`
 `{"error": "unauthorized"}` y no sale nada hacia GHL. La comparación es de
 tiempo constante. Solo se acepta este header: `Authorization: Bearer <llave>`
@@ -86,6 +92,7 @@ Todos en JSON y con `Cache-Control: no-store`. Cualquier otro status o body vien
 | `RATE_LIMIT_WINDOW_MS` | no | `10000` | Tamaño de la ventana deslizante, en ms. |
 | `UPSTREAM_TIMEOUT_MS` | no | `120000` | Inactividad máxima hacia GHL antes de responder 504. |
 | `UPSTREAM_USER_AGENT` | no | Chrome 154 de escritorio | User-Agent de navegador que se envía a GHL. |
+| `ADMIN_PIN` | no | — | Activa el panel `/admin`. Entre 6 y 64 caracteres; se recomiendan **8 dígitos**. Sin él, el panel no existe. |
 | `GHL_BASE_URL` | no | `https://services.leadconnectorhq.com` | Solo para pruebas locales contra un GHL simulado. No lo cambies en producción. |
 
 Si falta `GHL_TOKEN` o `PROXY_KEY` (o si alguna es inválida), el proceso
@@ -162,7 +169,7 @@ docker run --rm -p 8080:8080 --env-file .env ghl-proxy
 npm test
 ```
 
-Son 38 tests con `node:test`, sin dependencias extra, contra un GHL simulado.
+Son 48 tests con `node:test`, sin dependencias extra, contra un GHL simulado.
 Cubren arranque sin variables, `/health`, 401 en todas sus variantes, que la
 llave nunca llegue a GHL, inyección y sobrescritura de headers, headers de
 plataforma eliminados, path y query intactos, bodies (incluido chunked),
@@ -172,7 +179,10 @@ HEAD/204, handshake MCP completo, SSE en streaming real, rate limit con
 sin tumbar el proceso, respuesta temprana de GHL durante un upload grande,
 cancelación al desconectarse el cliente, reintento en socket keep-alive caído,
 apagado limpio con conexiones keep-alive y logs sin query, headers, bodies ni
-secretos.
+secretos. Además, el panel: PIN, bloqueo progresivo, cookies de sesión
+(falsificadas, alteradas o vencidas), CSRF/origen, cabeceras de seguridad,
+llave solo con sesión, `CONNECTION.md` exacto sin secretos, verificaciones en
+vivo contra un GHL simulado y PIN fuera de los logs.
 
 ### Prueba de aceptación contra el deploy
 
@@ -228,7 +238,8 @@ Los planes Free/Trial paran el servicio cuando se acaba el crédito.
    detecta el `Dockerfile` solo.
 2. Servicio → **Variables**: añade `GHL_TOKEN` y `PROXY_KEY` y márcalas como
    **sealed** (no se pueden volver a leer desde la UI ni desde el API).
-   Opcional: `GHL_LOCATION_ID=L3bLLVwvhdJ7A9WqkPxM`. No definas `PORT`:
+   Añade también `ADMIN_PIN` (sealed) para el panel. Opcional:
+   `GHL_LOCATION_ID=L3bLLVwvhdJ7A9WqkPxM`. No definas `PORT`:
    Railway lo inyecta. Despliega los cambios.
 3. **Settings → Deploy**:
    - *Healthcheck Path*: `/health`.
@@ -348,8 +359,84 @@ location / {
 
 ---
 
+## Panel del operador
+
+`https://<host>/admin`: un panel pensado para el celular, protegido con PIN.
+No hay usuario ni contraseña. Se activa definiendo `ADMIN_PIN` en la
+plataforma (por ejemplo, 8 dígitos que solo tú conozcas).
+
+Qué muestra:
+
+- **Estado:** verifica en vivo el token de GHL (y el nombre del sub-account),
+  una llamada REST y otra MCP hechas igual que las hará Muse, y que sin llave
+  se rechace. Resultado: *Todo funciona* / *Con avisos* / *Hay un problema*.
+- **Velocidad:** la misma llamada directa a GHL y por el proxy, intercaladas,
+  más lo que añade el proxy medido sobre el tráfico real (mediana y p95).
+- **Conectar Muse:** `CONNECTION.md` generado con el host real (copiar o
+  descargar), la llave del proxy (oculta; *Mostrar* / *Copiar*, se vuelve a
+  ocultar sola) y qué verificará Muse.
+- **Permisos del token:** qué familias de GHL puede leer (contactos,
+  conversaciones, oportunidades, calendarios, usuarios, workflows). Solo hace
+  lecturas.
+- **Seguridad** y **Actividad reciente:** método, ruta, estado y tiempos de
+  las últimas llamadas, más contadores de rechazos y errores. Nunca muestra
+  headers, bodies ni la query.
+
+Cómo se protege:
+
+- El PIN se compara en tiempo constante y nunca se registra en logs.
+- **Bloqueo progresivo global:** tras 5 PIN incorrectos, cada fallo bloquea
+  el acceso 30 s, luego 1, 2, 4… minutos, hasta 1 h, incluso con el PIN
+  correcto. Con 8 dígitos, adivinarlo por fuerza bruta llevaría siglos. Es
+  global (no por IP), así que cambiar de IP no ayuda. Si alguien lo está
+  bloqueando a propósito, el proxy de Muse sigue funcionando igual. Un
+  redeploy desbloquea el panel.
+- **Sesión** en cookie `HttpOnly`, `Secure`, `SameSite=Strict`, firmada con
+  una clave aleatoria por proceso. Dura 12 h. Reiniciar el servicio (por
+  ejemplo, al cambiar el PIN) cierra todas las sesiones.
+- Las acciones solo se aceptan con JSON del mismo origen (anti-CSRF). La CSP
+  es estricta (sin scripts inline ni recursos externos), el panel no se puede
+  embeber en otra página (anti-clickjacking) y va con `no-store` y HSTS.
+- El token de GHL nunca sale del servidor. El panel muestra solo sus últimos
+  4 caracteres. La llave del proxy solo se entrega a una sesión válida.
+- Las pruebas del panel se marcan con un header interno que nunca se reenvía
+  a GHL y no cuentan como intentos rechazados.
+
+Cambiar el PIN: actualiza `ADMIN_PIN` en la plataforma y redepliega.
+
+## Velocidad
+
+El proxy no añade latencia apreciable:
+
+- Reenvía en streaming (no espera el body completo) y reutiliza conexiones
+  TLS con GHL (keep-alive).
+- Mide su propio tiempo en cada llamada; el panel lo muestra.
+
+Medición real (2026-09-27, token real, `GET /contacts/?limit=1`, 25 rondas
+intercaladas, tiempo hasta el body completo):
+
+| Modo | p50 | p90 |
+|---|---|---|
+| Directo a GHL, conexión nueva por llamada (como `urllib`) | 137 ms | 188 ms |
+| Directo a GHL, reutilizando conexión | 103 ms | 238 ms |
+| **Por el proxy**, conexión nueva por llamada (como `urllib`) | **102 ms** | **121 ms** |
+| **Por el proxy**, reutilizando conexión | **101 ms** | 341 ms |
+
+Tiempo propio del proxy medido en tráfico real: **< 1 ms de mediana, 2 ms en
+p95**. Para un cliente tipo `urllib`, que abre una conexión nueva en cada
+llamada, el proxy resulta incluso más rápido que ir directo, porque la
+conexión con GHL ya está abierta. Los picos de p90 vienen de GHL: aparecen
+igual yendo directo.
+
+En producción se suma un salto de red Muse → proxy. Para que sea mínimo,
+despliega el proxy en una región de **EE. UU. (p. ej. US East)**, cerca de
+Muse y del edge de GHL.
+
 ## Handoff a Muse
 
+0. Lo más fácil: abre `https://<host>/admin`, entra con el PIN y usa la
+   sección **Conectar Muse** (copiar `CONNECTION.md` y la llave). Los pasos 1–3
+   son la alternativa por terminal.
 1. `./scripts/write-connection.sh <host>` verifica `https://<host>/health` y
    escribe `CONNECTION.md` con exactamente estos campos: `middleware_host`,
    `auth_placement`, `rest_base_path`, `mcp_path`, `health_url`,
@@ -408,6 +495,9 @@ src/
   auth.js        X-Proxy-Key en tiempo constante
   http-util.js   respuestas JSON propias del proxy (sendJson)
   rate-limit.js  ventana deslizante en memoria
+  metrics.js     tiempos por llamada (GHL vs proxy) para el panel
+  admin.js       panel /admin: PIN, sesión, verificaciones en vivo
+  admin/         frontend del panel (HTML/CSS/JS sin dependencias)
   logger.js      logs JSON: method, path, status, ms
 test/            node:test + GHL simulado
 scripts/

@@ -4,6 +4,7 @@ const http = require('node:http');
 const https = require('node:https');
 const { sendJson } = require('./http-util');
 const { loggablePath } = require('./logger');
+const { createTiming } = require('./metrics');
 
 // RFC 9110 §7.6.1 connection-specific headers: never forwarded in either direction.
 const HOP_BY_HOP = new Set([
@@ -24,6 +25,7 @@ const DROP_REQUEST = new Set([
   'x-proxy-key', // the proxy's own secret
   'authorization', // replaced by the GHL token
   'user-agent', // replaced by a browser signature
+  'x-admin-check', // marks the dashboard's own test calls; internal only
   'content-length', // re-added below when the client sent a fixed-length body
   'expect', // 100-continue is answered by this server, not relayed
   // Added by the hosting platform's edge, not by Muse. Relaying them to GHL's
@@ -151,6 +153,8 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
     let upstreamReq = null;
     let gotResponse = false;
     let finished = false;
+    const timing = createTiming(res.locals.startedAt);
+    res.locals.timing = timing;
 
     // When the upstream exchange ends before the client finished uploading (early
     // response or error), discard the rest of the body so the client can read our answer.
@@ -164,6 +168,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
     const fail = (err) => {
       if (finished) return;
       finished = true;
+      res.locals.upstreamError = true;
       drainRequest();
       const timedOut = err && err.code === 'UPSTREAM_TIMEOUT';
       logger.error({
@@ -196,6 +201,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         res.writeHead(statusCode);
       }
       if (isStream) res.flushHeaders();
+      timing.relayed();
 
       upstreamRes.on('error', (err) => fail(err));
       upstreamRes.on('end', () => {
@@ -222,6 +228,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         timeout: config.upstreamTimeoutMs,
       });
       upstreamReq = outgoing;
+      timing.sent();
 
       outgoing.on('timeout', () => {
         outgoing.destroy(upstreamError('UPSTREAM_TIMEOUT', 'upstream timeout'));
@@ -248,6 +255,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
       outgoing.on('response', (upstreamRes) => {
         if (upstreamReq !== outgoing) return;
         gotResponse = true;
+        timing.upstreamHeaders();
         try {
           relay(upstreamRes, outgoing);
         } catch (err) {

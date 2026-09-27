@@ -37,7 +37,7 @@ async function startUpstream(handler) {
 }
 
 /** The proxy under test, in-process, pointed at `upstreamUrl`. */
-async function startProxy(upstreamUrl, env = {}) {
+async function startProxy(upstreamUrl, env = {}, appOptions = {}) {
   const config = loadConfig({ GHL_TOKEN: TOKEN, PROXY_KEY: KEY, GHL_BASE_URL: upstreamUrl, ...env });
   const lines = [];
   const logger = {
@@ -45,9 +45,10 @@ async function startProxy(upstreamUrl, env = {}) {
     warn: (fields) => lines.push({ level: 'warn', ...fields }),
     error: (fields) => lines.push({ level: 'error', ...fields }),
   };
-  const app = createApp(config, logger);
+  const app = createApp(config, logger, appOptions);
   const server = http.createServer(app);
   const url = await listen(server);
+  app.locals.selfUrl = url;
   return {
     url,
     config,

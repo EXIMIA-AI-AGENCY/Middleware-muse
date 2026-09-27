@@ -29,12 +29,14 @@ server.keepAliveTimeout = 65_000;
 server.headersTimeout = 66_000;
 
 server.listen(config.port, () => {
+  app.locals.selfUrl = `http://127.0.0.1:${server.address().port}`;
   logger.info({
     msg: 'listening',
     port: config.port,
     version: config.version,
     upstream: config.upstreamBase.origin,
     rateLimit: `${config.rateLimitMax}/${config.rateLimitWindowMs}ms`,
+    admin: config.adminPin ? 'enabled' : 'disabled',
   });
 });
 

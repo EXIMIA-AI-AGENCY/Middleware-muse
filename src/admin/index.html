@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light dark">
+  <title>ghl-proxy · Panel</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Cpath d='M9 16h14M17 10l6 6-6 6' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/admin/app.css">
+  <script src="/admin/app.js" defer></script>
+</head>
+<body>
+  <svg width="0" height="0" class="sprite" aria-hidden="true">
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.01" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H8m0 0l5-5m-5 5l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 10.5V8a3.5 3.5 0 017 0v2.5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  </svg>
+
+  <!-- PIN -->
+  <main id="login" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="on" novalidate>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 16h14M17 10l6 6-6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <div>
+          <h1>ghl-proxy</h1>
+          <p class="muted">GoHighLevel ↔ Muse</p>
+        </div>
+      </div>
+      <label for="pin" class="pin-label"><svg class="icon"><use href="#i-lock"/></svg> Ingresa tu PIN</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="64" class="pin-input" required aria-describedby="login-msg">
+      <p id="login-msg" class="login-msg" role="alert" aria-live="assertive"></p>
+      <div class="keypad" aria-hidden="true">
+        <button type="button" data-key="1" tabindex="-1">1</button><button type="button" data-key="2" tabindex="-1">2</button><button type="button" data-key="3" tabindex="-1">3</button>
+        <button type="button" data-key="4" tabindex="-1">4</button><button type="button" data-key="5" tabindex="-1">5</button><button type="button" data-key="6" tabindex="-1">6</button>
+        <button type="button" data-key="7" tabindex="-1">7</button><button type="button" data-key="8" tabindex="-1">8</button><button type="button" data-key="9" tabindex="-1">9</button>
+        <button type="button" data-key="back" class="key-muted" tabindex="-1"><svg class="icon"><use href="#i-back"/></svg></button>
+        <button type="button" data-key="0" tabindex="-1">0</button>
+        <button type="submit" class="key-go" tabindex="-1">Entrar</button>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block login-submit">Entrar</button>
+    </form>
+  </main>
+
+  <!-- Dashboard -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand brand-sm">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 16h14M17 10l6 6-6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <div>
+          <h1>ghl-proxy</h1>
+          <p class="muted" id="host-label">—</p>
+        </div>
+      </div>
+      <button id="logout" type="button" class="btn btn-ghost">Salir</button>
+    </header>
+
+    <main class="grid">
+      <!-- Estado -->
+      <section class="card card-status" aria-labelledby="status-title">
+        <div class="status-head">
+          <div id="status-badge" class="status-badge" data-state="pending" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></div>
+          <div class="status-text">
+            <h2 id="status-title">Verificando…</h2>
+            <p id="status-sub" class="muted">Probando GoHighLevel, el proxy y el MCP.</p>
+          </div>
+          <button id="run-checks" type="button" class="btn">Verificar ahora</button>
+        </div>
+        <ul id="checks" class="checklist" aria-live="polite"></ul>
+      </section>
+
+      <!-- Velocidad -->
+      <section class="card card-speed" aria-labelledby="speed-title">
+        <h2 id="speed-title">Velocidad</h2>
+        <div class="speed">
+          <div class="metric"><span class="metric-label">GHL directo</span><span class="metric-value" id="speed-direct">—</span></div>
+          <div class="metric"><span class="metric-label">Por el proxy</span><span class="metric-value" id="speed-proxy">—</span></div>
+          <div class="metric metric-accent"><span class="metric-label">Diferencia</span><span class="metric-value" id="speed-diff">—</span></div>
+        </div>
+        <p class="muted small" id="speed-note">Misma llamada a GoHighLevel, directa y por el proxy, 5 veces intercaladas (mediana).</p>
+        <dl class="kv" id="traffic"></dl>
+      </section>
+
+      <!-- Conectar Muse -->
+      <section class="card card-wide card-connect" aria-labelledby="connect-title">
+        <h2 id="connect-title">Conectar Muse</h2>
+        <ol class="steps">
+          <li>
+            <h3>Datos de conexión <span class="muted">(CONNECTION.md)</span></h3>
+            <p class="muted small">Sin secretos. Entrégalos a Muse tal cual.</p>
+            <pre id="connection" class="code" tabindex="0">—</pre>
+            <div class="actions">
+              <button type="button" class="btn" id="copy-connection">Copiar</button>
+              <a class="btn btn-ghost" id="download-connection" href="/admin/api/connection.md" download="CONNECTION.md">Descargar</a>
+            </div>
+          </li>
+          <li>
+            <h3>Llave del proxy</h3>
+            <p class="muted small">Muse la pide en su tarjeta segura de credenciales. Pégala solo ahí: nunca en un chat ni en un correo.</p>
+            <div class="secret">
+              <code id="proxy-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn" id="reveal-key">Mostrar</button>
+              <button type="button" class="btn" id="copy-key">Copiar llave</button>
+            </div>
+          </li>
+          <li>
+            <h3>Muse verifica</h3>
+            <p class="muted small">Muse llama a <code id="health-url">/health</code> y a <code>/ghl/contacts/</code>. Si arriba dice <strong>Todo funciona</strong>, ya puede usar el proxy.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Permisos -->
+      <section class="card card-perm" aria-labelledby="perm-title">
+        <h2 id="perm-title">Permisos del token</h2>
+        <p class="muted small">Lo que Muse puede leer en GoHighLevel con este token. Se cambian en GHL → Settings → Private Integrations.</p>
+        <ul id="permissions" class="perm-list"></ul>
+      </section>
+
+      <!-- Seguridad -->
+      <section class="card card-sec" aria-labelledby="sec-title">
+        <h2 id="sec-title">Seguridad</h2>
+        <dl class="kv" id="security"></dl>
+      </section>
+
+      <!-- Actividad -->
+      <section class="card card-wide" aria-labelledby="activity-title">
+        <div class="card-head">
+          <h2 id="activity-title">Actividad reciente</h2>
+          <span class="muted small" id="activity-updated"></span>
+        </div>
+        <div class="counters" id="counters"></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Hora</th><th>Llamada</th><th class="num">Estado</th><th class="num">GHL</th><th class="num">Total</th></tr></thead>
+            <tbody id="activity"></tbody>
+          </table>
+        </div>
+        <p class="muted small">Solo método, ruta, estado y tiempos. Nunca headers, bodies ni datos de la query.</p>
+      </section>
+    </main>
+    <footer class="footer muted small" id="footer"></footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

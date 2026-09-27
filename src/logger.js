@@ -23,10 +23,11 @@ function loggablePath(url) {
   return path.length > MAX_PATH_LENGTH ? `${path.slice(0, MAX_PATH_LENGTH)}…` : path;
 }
 
-/** Access log: method, path, status and latency only. */
-function requestLogger(logger) {
+/** Access log: method, path, status and latency only. Optionally feeds the dashboard metrics. */
+function requestLogger(logger, metrics, isCheck = () => false) {
   return (req, res, next) => {
     const start = process.hrtime.bigint();
+    res.locals.startedAt = start;
     res.once('close', () => {
       const fields = {
         method: req.method,
@@ -36,6 +37,16 @@ function requestLogger(logger) {
       };
       if (!res.writableFinished) fields.aborted = true;
       logger.info(fields);
+      if (metrics) {
+        const { timing, upstreamError } = res.locals;
+        metrics.record({
+          method: req.method,
+          url: req.originalUrl,
+          status: res.statusCode,
+          timing: timing && timing.result(upstreamError),
+          check: isCheck(req),
+        });
+      }
     });
     next();
   };

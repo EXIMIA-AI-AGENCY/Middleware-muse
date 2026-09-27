@@ -17,6 +17,7 @@ const DEFAULTS = Object.freeze({
 });
 
 const MIN_PROXY_KEY_LENGTH = 32;
+const MIN_ADMIN_PIN_LENGTH = 6;
 // Visible ASCII only: anything else would be rejected when written into an HTTP header.
 const HEADER_SAFE = /^[\x21-\x7e]+$/;
 // Same, but inner spaces allowed (User-Agent values contain them).
@@ -82,6 +83,18 @@ function loadConfig(env = process.env) {
     throw new ConfigError('GHL_LOCATION_ID contains whitespace or non-printable characters');
   }
 
+  // Optional: enables the /admin dashboard. Without it the dashboard does not exist.
+  const adminPin = (env.ADMIN_PIN ?? '').trim() || null;
+  if (adminPin !== null) {
+    if (!HEADER_SAFE.test(adminPin)) throw new ConfigError('ADMIN_PIN contains whitespace or non-printable characters');
+    if (adminPin.length < MIN_ADMIN_PIN_LENGTH || adminPin.length > 64) {
+      throw new ConfigError(`ADMIN_PIN must be between ${MIN_ADMIN_PIN_LENGTH} and 64 characters (8 digits recommended)`);
+    }
+    if (adminPin === proxyKey || adminPin === ghlToken) {
+      throw new ConfigError('ADMIN_PIN must be different from PROXY_KEY and GHL_TOKEN');
+    }
+  }
+
   const userAgent = (env.UPSTREAM_USER_AGENT ?? '').trim() || DEFAULTS.userAgent;
   if (!HEADER_SAFE_WITH_SPACES.test(userAgent)) {
     throw new ConfigError('UPSTREAM_USER_AGENT contains non-printable characters');
@@ -92,6 +105,7 @@ function loadConfig(env = process.env) {
     ghlToken,
     proxyKey,
     ghlLocationId,
+    adminPin,
     port: readInt(env, 'PORT', DEFAULTS.port, { min: 1, max: 65535 }),
     upstreamBase: readUpstreamBase(env),
     ghlVersion: DEFAULTS.ghlVersion,
@@ -108,4 +122,4 @@ function loadConfig(env = process.env) {
   });
 }
 
-module.exports = { loadConfig, ConfigError, DEFAULTS, MIN_PROXY_KEY_LENGTH };
+module.exports = { loadConfig, ConfigError, DEFAULTS, MIN_PROXY_KEY_LENGTH, MIN_ADMIN_PIN_LENGTH };
