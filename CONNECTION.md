@@ -1,14 +1,13 @@
 # CONNECTION — ghl-proxy → Muse
 
 Handoff para Muse. Sin secretos; la llave del proxy se entrega al operador por separado.
-PENDIENTE DE DEPLOY. Regenerar con ./scripts/write-connection.sh HOST tras el deploy (rellena middleware_host y health_url).
 
 ```yaml
-middleware_host: PENDIENTE
+middleware_host: ghl-proxy-muse.vercel.app
 auth_placement: header:X-Proxy-Key
 rest_base_path: /ghl
 mcp_path: /mcp/
-health_url: https://PENDIENTE/health
+health_url: https://ghl-proxy-muse.vercel.app/health
 ghl_location_id: L3bLLVwvhdJ7A9WqkPxM
 version: 1.0.0
 ```
