@@ -1,0 +1,20 @@
+{
+  "name": "ghl-proxy",
+  "version": "1.0.0",
+  "description": "Proxy HTTPS entre Muse y el API de GoHighLevel (REST + MCP). Guarda el token de GHL; Muse usa una llave propia del proxy.",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "start:local": "node --env-file=.env src/server.js",
+    "test": "node --test test/*.test.js",
+    "smoke": "bash scripts/smoke-test.sh"
+  },
+  "dependencies": {
+    "express": "5.2.1"
+  }
+}

@@ -1,0 +1,7 @@
+# Caddy obtiene y renueva el certificado TLS solo y redirige HTTP -> HTTPS.
+{$PROXY_DOMAIN} {
+	reverse_proxy ghl-proxy:8080 {
+		# Entrega cada evento SSE del MCP en cuanto llega.
+		flush_interval -1
+	}
+}
