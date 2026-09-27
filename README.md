@@ -341,6 +341,37 @@ Los contenedores se reinician solos (`restart: unless-stopped`), también
 después de reiniciar el VPS si Docker arranca con el sistema
 (`systemctl enable docker`).
 
+### Opción E — Vercel (serverless)
+
+Proyecto actual: **`ghl-proxy-muse`** (equipo EXIMIA) →
+`https://ghl-proxy-muse.vercel.app`, región `iad1` (US East), Node 24.
+Vercel ejecuta el `app.js` de la raíz (exporta la app Express). `src/server.js`
+no se usa ahí.
+
+1. *Settings → Environment Variables* (entorno **Production**, tipo
+   **Sensitive**): `GHL_TOKEN`, `PROXY_KEY`, `ADMIN_PIN` y, opcional,
+   `GHL_LOCATION_ID`.
+2. *Deployments → … → Redeploy*. Los cambios de variables solo se aplican
+   al redesplegar.
+3. Abre `https://ghl-proxy-muse.vercel.app/admin` y pulsa **Verificar ahora**.
+
+Diferencias con un servidor siempre encendido (Railway, VPS):
+
+- **Arranque en frío:** tras un rato sin tráfico, la primera llamada tarda
+  algo más mientras Vercel levanta la función. Las siguientes van a la
+  velocidad normal. Si Muse necesita latencia mínima constante, usa
+  Railway o un VPS.
+- El rate limit, el bloqueo del PIN y las métricas del panel son **por
+  instancia**. Vercel puede tener varias a la vez, así que las cifras del
+  panel son parciales y los límites, aproximados. Con un PIN de 8 dígitos
+  al azar la fuerza bruta sigue siendo inviable.
+- La sesión del panel se firma con una clave derivada de `PROXY_KEY` +
+  `ADMIN_PIN`, así que vale en cualquier instancia. **Salir** borra la
+  cookie en tu navegador; la invalidación en servidor es por instancia.
+  Cambiar el PIN o la llave cierra todas las sesiones.
+- Los headers internos de Vercel (`x-vercel-*`, `x-matched-path`…) nunca se
+  reenvían a GHL.
+
 ### Nginx u otro reverse proxy propio
 
 Si pones nginx delante en lugar de Caddy, desactiva el buffering para el MCP.
