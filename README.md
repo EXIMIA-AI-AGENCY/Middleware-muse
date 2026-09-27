@@ -470,6 +470,25 @@ En producción se suma un salto de red Muse → proxy. Para que sea mínimo,
 despliega el proxy en una región de **EE. UU. (p. ej. US East)**, cerca de
 Muse y del edge de GHL.
 
+### Medición en producción (Vercel, `iad1`, 2026-09-27, token real)
+
+| Medición | Resultado |
+|---|---|
+| Tiempo propio del proxy por llamada (panel, 3 corridas) | **0,47–0,63 ms** |
+| Desde dentro de Vercel: GHL directo vs. por la URL pública del proxy | 90 ms vs. 108 ms (**+14 a 18 ms**, dentro de la variación de GHL: 19–39 ms) |
+| Arranque en frío: primera llamada tras 10,5 min sin tráfico | ~+30 ms respecto a una llamada normal |
+| Desde un cliente lejano (entra por el edge de Vercel en `sfo1`, función en `iad1`) | 142 ms directo vs. 310 ms por el proxy (conexión nueva por llamada) |
+
+Conclusión: el código del proxy añade menos de 1 ms. Lo que puede sumarse
+es **la distancia de red** entre Muse y la región del proxy:
+
+- Si Muse corre en EE. UU. Este, `iad1` es la región correcta (unos +15 ms).
+- Si corre en otro lugar, elige la región de Vercel más cercana a Muse
+  (*Settings → Functions → Region*).
+- Si Muse reutiliza conexiones (`requests.Session` o `http.client`
+  persistente en lugar de `urllib` sin más), se ahorra el TLS en cada
+  llamada: ~90 ms menos desde lejos.
+
 ## Handoff a Muse
 
 0. Lo más fácil: abre `https://<host>/admin`, entra con el PIN y usa la
