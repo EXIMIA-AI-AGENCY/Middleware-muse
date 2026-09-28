@@ -9,6 +9,8 @@ const USER_AGENT = `ghl-proxy-kraken/${version}`;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_QUEUE = 30;
 const NONCE_RETRY_DELAY_MS = 300;
+const STATUS_CACHE_MS = 10_000;
+const STATUS_TIMEOUT_MS = 4_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -18,6 +20,26 @@ function parseJson(text) {
   } catch {
     return null;
   }
+}
+
+/**
+ * A JS number as a plain decimal string. Kraken wants decimals like "0.0000001"; String()
+ * would give "1e-7" for very small or very large values.
+ */
+function plainNumber(n) {
+  const s = String(n);
+  if (!/e/i.test(s)) return s;
+  const [mantissa, exponent] = s.toLowerCase().split('e');
+  const negative = mantissa.startsWith('-');
+  const unsigned = negative ? mantissa.slice(1) : mantissa;
+  const dot = unsigned.indexOf('.');
+  const digits = unsigned.replace('.', '');
+  const point = (dot === -1 ? unsigned.length : dot) + Number(exponent);
+  let out;
+  if (point <= 0) out = `0.${'0'.repeat(-point)}${digits}`;
+  else if (point >= digits.length) out = digits + '0'.repeat(point - digits.length);
+  else out = `${digits.slice(0, point)}.${digits.slice(point)}`;
+  return negative ? `-${out}` : out;
 }
 
 /**
@@ -33,7 +55,7 @@ function encodeBody(params, nonce) {
   }
   const form = new URLSearchParams();
   form.append('nonce', nonce);
-  for (const [key, value] of Object.entries(params)) form.append(key, String(value));
+  for (const [key, value] of Object.entries(params)) form.append(key, typeof value === 'number' ? plainNumber(value) : String(value));
   return { body: form.toString(), contentType: 'application/x-www-form-urlencoded' };
 }
 
@@ -49,8 +71,9 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = config
   const nextNonce = createNonceSource(now);
   let queue = Promise.resolve();
   let queued = 0;
+  let statusCache = null;
 
-  function send(method, path, { headers = {}, body } = {}) {
+  function send(method, path, { headers = {}, body, timeout = timeoutMs } = {}) {
     return new Promise((resolve) => {
       const started = process.hrtime.bigint();
       const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
@@ -83,7 +106,7 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = config
         },
       );
       // One deadline for the whole exchange: a slow trickle of bytes cannot hold the queue.
-      deadline = setTimeout(() => req.destroy(Object.assign(new Error('timeout'), { code: 'KRAKEN_TIMEOUT' })), timeoutMs);
+      deadline = setTimeout(() => req.destroy(Object.assign(new Error('timeout'), { code: 'KRAKEN_TIMEOUT' })), timeout);
       req.on('error', (err) => {
         const timedOut = err.code === 'KRAKEN_TIMEOUT';
         // `reused` + no response: a kept-alive socket that had gone stale, so Kraken never saw it.
@@ -152,7 +175,19 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = config
     publicCall(name) {
       return send('GET', `/0/public/${name}`);
     },
+
+    /**
+     * Kraken's own status ("online", "maintenance", "cancel_only", "post_only", …), used to
+     * explain failures. Cached briefly; null when Kraken does not answer.
+     */
+    async systemStatus() {
+      if (statusCache && now() - statusCache.at < STATUS_CACHE_MS) return statusCache.value;
+      const res = await send('GET', '/0/public/SystemStatus', { timeout: STATUS_TIMEOUT_MS });
+      const status = res.json && res.json.result && typeof res.json.result.status === 'string' ? res.json.result.status : null;
+      statusCache = { at: now(), value: status };
+      return status;
+    },
   };
 }
 
-module.exports = { createKrakenClient, encodeBody, USER_AGENT };
+module.exports = { createKrakenClient, encodeBody, plainNumber, USER_AGENT };
