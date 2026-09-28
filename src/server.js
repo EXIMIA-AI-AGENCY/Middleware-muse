@@ -18,7 +18,18 @@ try {
 
 let shuttingDown = false;
 
-const app = createApp(config, logger);
+// Optional and isolated: without Kraken settings, with wrong ones, or even if the Kraken code
+// failed to load, GHL runs exactly as before.
+function loadKraken() {
+  try {
+    return require('./kraken').tryCreateKraken({ env: process.env, ghlConfig: config, logger });
+  } catch (err) {
+    logger.error({ msg: 'kraken_disabled', name: err && err.name });
+    return null;
+  }
+}
+const kraken = loadKraken();
+const app = createApp(config, logger, { kraken });
 const server = http.createServer(app);
 // During shutdown, answer on any connection and then close it, so no new work lands here.
 server.prependListener('request', (req, res) => {

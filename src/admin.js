@@ -387,6 +387,7 @@ function createAdminRouter({
   metrics,
   getSelfUrl,
   checkMarker,
+  kraken = null,
   lockout = createLockout(),
   sessions = createSessions({ secret: `${config.proxyKey}\u0000${config.adminPin}` }),
 }) {
@@ -522,6 +523,10 @@ function createAdminRouter({
     });
     res.end(body);
   });
+
+  if (kraken) {
+    kraken.mountAdmin(router, { requireSession, sameOriginJson, publicHost, getSelfUrl, checkMarker, call: createClient() });
+  }
 
   router.use('/api', (req, res) => sendJson(res, 404, { error: 'not_found' }));
   router.use((req, res) => sendJson(res, 404, { error: 'not_found' }));

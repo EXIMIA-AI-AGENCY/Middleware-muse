@@ -17,6 +17,9 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
   velocidad, permisos del token y los datos para conectar Muse, listos para
   copiar. Ver [Panel del operador](#panel-del-operador).
 - **Velocidad:** el proxy añade menos de 1 ms. Ver [Velocidad](#velocidad).
+- **Kraken (opcional):** el mismo servicio firma llamadas de solo lectura a la
+  API privada de Kraken para Muse, con su propia llave. Si no se configura, no
+  cambia nada de GoHighLevel. Ver [Kraken](#kraken).
 
 ---
 
@@ -28,6 +31,7 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 | `ALL /ghl/*` | `X-Proxy-Key` | Quita `/ghl` y reenvía método, path, query string (sin tocar su codificación), headers y body a `https://services.leadconnectorhq.com/<path>`. Devuelve status, headers y body del upstream tal cual. |
 | `POST /mcp/` | `X-Proxy-Key` | Reenvía el JSON-RPC a `https://services.leadconnectorhq.com/mcp/` (MCP streamable HTTP) y devuelve la respuesta en streaming (SSE). `/mcp` sin barra final funciona igual. Otros métodos (`GET`, `DELETE`…) también se reenvían y GHL decide la respuesta (hoy `405`/`404`). |
 | `TRACE /ghl/*`, `TRACE /mcp/` | `X-Proxy-Key` | `405 {"error": "method_not_allowed"}`. `TRACE` devuelve los headers recibidos, así que reenviarlo podría exponer el token de GHL inyectado. |
+| `POST /api/kraken`, `GET /api/kraken?health=1` | llave de Kraken | Ver [Kraken](#kraken). Independiente de todo lo de GHL. |
 | `/admin`, `GET /` | PIN (sesión) | Panel del operador. Solo existe si `ADMIN_PIN` está definido; `GET /` redirige a `/admin`. Sin `ADMIN_PIN`, estas rutas responden `401` como cualquier otra. |
 | cualquier otra | `X-Proxy-Key` | `404 {"error": "not_found"}` |
 
@@ -541,6 +545,196 @@ Comportamiento real de GHL, verificado contra `services.leadconnectorhq.com`:
   `body_` (p. ej. `path_contactId`). Usa los nombres de `tools/list`, no los de
   la documentación de ayuda.
 
+## Kraken
+
+Muse también puede leer la cuenta de **Kraken** a través de este mismo
+servicio. La API privada de Kraken no acepta una llave simple: cada llamada
+debe ir **firmada** con la *Private key*. El proxy guarda tus dos claves de
+Kraken, firma cada llamada y le da a Muse **una sola llave** para usarlo.
+
+```
+Muse --(X-Proxy-Key: llave de Kraken)--> /api/kraken --(API-Key + API-Sign)--> api.kraken.com
+```
+
+Es una parte aparte de GoHighLevel: otra llave, otro límite, otros errores.
+Si las claves de Kraken faltan o están mal, `/api/kraken` responde `503` y
+GoHighLevel sigue exactamente igual.
+
+### Configurarlo (unos 5 minutos, sin tocar código)
+
+El panel (`/admin` → pestaña **Kraken**) muestra estos mismos pasos.
+
+1. **Crea una API key en Kraken, solo para Muse.** Kraken → tu perfil →
+   **Settings → API** → **Create API key**. Nombre: `Muse`. Permisos:
+   - ✓ **Query Funds**
+   - ✓ **Query Open Orders & Trades**
+   - ✓ **Query Closed Orders & Trades**
+   - ✓ **Query Ledger Entries**
+   - ✕ Todo lo demás **desmarcado**: sobre todo **Withdraw Funds**, y también
+     Deposit, Earn, Create & Modify Orders y Cancel/Close Orders.
+   - En **Advanced**: **Nonce Window = `10000`** (ver [Nonce](#nonce)).
+   - **Lista de IPs:** déjala vacía en Vercel. Vercel no tiene una IP de salida
+     fija, así que una lista de IPs haría fallar llamadas al azar. Si lo
+     despliegas en un VPS propio (IP fija), sí puedes y conviene restringirla
+     a esa IP.
+   - Kraken muestra la **Private key** una sola vez: tenla a mano para el
+     paso 2. Usa esta llave solo para Muse (no la compartas con otra app o
+     bot).
+2. **Pégalas en Vercel, nunca en un chat.** Vercel → proyecto
+   `ghl-proxy-muse` → **Settings → Environment Variables** → añade, en
+   **Production** y marcadas como **Sensitive**:
+
+   | Variable | Valor |
+   |---|---|
+   | `KRAKEN_API_KEY` | la **API key** de Kraken |
+   | `KRAKEN_API_SECRET` | la **Private key** de Kraken (tal cual, en base64) |
+
+3. **Redeploy:** Vercel → **Deployments** → el último → **⋯ → Redeploy**.
+4. Abre el panel → **Kraken** → **Verificar ahora**. Todo debe salir en verde:
+   claves válidas, firma PASS, sin llave no entra nadie, retiros bloqueados y
+   un `Balance` de prueba a través de la dirección pública.
+5. **Conectar Muse:** pulsa **Copiar mensaje para Muse**, pégalo en Muse y,
+   cuando te pida la llave, cópiala con **Copiar llave** y pégala en su
+   tarjeta segura.
+
+### Variables de entorno de Kraken
+
+| Variable | Obligatoria | Qué es |
+|---|---|---|
+| `KRAKEN_API_KEY` | sí | API key pública de Kraken. |
+| `KRAKEN_API_SECRET` | sí | Private key de Kraken, en base64. |
+| `ENABLE_TRADING` | no | Solo si vale exactamente `true` se permiten los métodos de trading. Cualquier otro valor (o vacío) = solo lectura. |
+| `KRAKEN_PROXY_KEY` | no | Llave de Muse para Kraken (32+ caracteres). Si no la pones, se genera sola a partir de tus dos claves. Úsala solo si quieres cambiar la llave de Muse sin cambiar las claves de Kraken. Debe ser distinta de `PROXY_KEY`. |
+| `KRAKEN_PUBLIC_HOST` | no | Dirección que el panel da a Muse para Kraken (p. ej. `kraken-proxy-muse.vercel.app`). Vacía = la del panel. |
+
+**Sobre el nombre de la llave:** la especificación original de Kraken la llama
+`PROXY_KEY`, pero ese nombre ya es la llave de GoHighLevel. Para que una llave
+nunca abra el otro servicio, la de Kraken es independiente: por defecto se
+**deriva** de tus dos claves de Kraken (HKDF-SHA256, de un solo sentido:
+conocerla no revela la Private key) o se toma de `KRAKEN_PROXY_KEY`. Cambiar
+las claves de Kraken cambia la llave de Muse; el panel siempre muestra la
+vigente.
+
+### La API para Muse
+
+- `GET /api/kraken?health=1` → `{"ok": true}` (sin llave; `503` si faltan las claves).
+- `POST /api/kraken` con `X-Proxy-Key: <llave de Kraken>` y
+  `{"method": "Balance", "params": {}}` → el JSON de Kraken tal cual
+  (`{"error": [...], "result": {...}}`), con el mismo status HTTP.
+
+```bash
+HOST=https://ghl-proxy-muse.vercel.app
+read -rs -p "Llave de Kraken: " KKEY; echo
+
+# Salud (sin llave)
+curl -s "$HOST/api/kraken?health=1"
+
+# Saldo
+curl -s -X POST "$HOST/api/kraken" \
+  -H "X-Proxy-Key: $KKEY" -H "Content-Type: application/json" \
+  -d '{"method":"Balance"}'
+
+# Movimientos de bitcoin (con parámetros; los números van como texto)
+curl -s -X POST "$HOST/api/kraken" \
+  -H "X-Proxy-Key: $KKEY" -H "Content-Type: application/json" \
+  -d '{"method":"Ledgers","params":{"asset":"XXBT","start":"1735689600"}}'
+
+# Debe dar 403: los retiros están bloqueados siempre
+curl -s -X POST "$HOST/api/kraken" \
+  -H "X-Proxy-Key: $KKEY" -H "Content-Type: application/json" \
+  -d '{"method":"Withdraw","params":{}}'
+```
+
+**Métodos permitidos (solo lectura, siempre):** `Balance`, `TradeBalance`,
+`OpenOrders`, `ClosedOrders`, `QueryOrders`, `TradesHistory`, `QueryTrades`,
+`OpenPositions`, `Ledgers`, `QueryLedgers`, `TradeVolume`, `DepositMethods`,
+`DepositAddresses` (solo direcciones existentes: `new=true` da `403`),
+`DepositStatus`, `WithdrawStatus`, `WithdrawInfo`, `GetWebSocketsToken`.
+
+**Trading (solo con `ENABLE_TRADING=true`):** `AddOrder`, `AmendOrder`,
+`CancelOrder`, `CancelAll`, `CancelAllOrdersAfter`, `AddOrderBatch`,
+`CancelOrderBatch`.
+
+**Nunca, en ninguna configuración:** `Withdraw`, `WithdrawCancel`,
+`WalletTransfer`, `AccountTransfer`, `CreateSubaccount`, `Earn/Allocate`,
+`Earn/Deallocate` y cualquier otro nombre con *withdraw*, *transfer* o
+*allocate* que no esté en la lista de lectura. Cualquier método que no esté en
+las listas de arriba también se rechaza (`403`). Los nombres se comparan
+exactos (mayúsculas incluidas) y la ruta hacia Kraken se construye siempre
+desde la lista, nunca desde el texto recibido.
+
+Los precios y datos de mercado (`Ticker`, `OHLC`…) son públicos: Muse los pide
+directo a `https://api.kraken.com/0/public/...`, sin el proxy.
+
+### Errores propios (formato de Kraken)
+
+Para que Muse trate igual los errores del proxy y los de Kraken, el proxy
+responde con `{"error": ["EProxy:..."]}` y nunca llama a Kraken en estos
+casos:
+
+| Status | Cuándo |
+|---|---|
+| `400` | El cuerpo no es un objeto JSON, `method` no es texto, `params` no es un objeto, un parámetro no es texto/número/booleano, o incluye `nonce` (lo pone el proxy). |
+| `401` | Falta la llave o no coincide (comparación en tiempo constante). |
+| `403` | Método fuera de la lista, trading desactivado, retiros/transferencias, o `DepositAddresses` con `new=true`. |
+| `405` | `GET` sin `?health=1` u otro verbo. |
+| `413` | Cuerpo de más de 64 KB. |
+| `429` | Más de 60 llamadas por minuto desde la misma IP (`Retry-After`). |
+| `502` / `504` | Kraken no respondió, respondió algo que no es JSON o tardó más de 20 s. |
+| `503` | Faltan o están mal las claves de Kraken en el servidor. |
+
+Todas las respuestas llevan `Cache-Control: no-store`.
+
+### Firma
+
+`API-Sign = base64(HMAC-SHA512(base64decode(private key), ruta + SHA256(nonce + cuerpo)))`,
+con la ruta desde `/0/private/...` y el `nonce` como primer parámetro del
+cuerpo `application/x-www-form-urlencoded` (exactamente como el ejemplo
+oficial). Para `AddOrderBatch` y `CancelOrderBatch`, que llevan una lista de
+órdenes, el cuerpo va en JSON y se firma ese mismo texto.
+
+`node test-sign.js` comprueba la firma contra el ejemplo oficial de Kraken y
+que el cuerpo que arma el proxy es idéntico al del ejemplo. Debe imprimir
+`PASS`. El panel repite esa comprobación en el servidor en vivo.
+
+### Nonce
+
+Kraken exige que el `nonce` de cada llamada con una misma API key sea mayor
+que el anterior, y no se puede reiniciar. El proxy usa milisegundos
+(`Date.now()`), nunca repite ni retrocede, y dentro de cada instancia envía
+las llamadas a Kraken de una en una y en orden. En Vercel puede haber varias
+instancias a la vez, y dos llamadas casi simultáneas podrían llegar a Kraken
+en desorden. Por eso:
+
+- la API key se crea con **Nonce Window = 10000** (tolera 10 s de desorden);
+- si Kraken responde `EAPI:Invalid nonce` en un método de lectura, el proxy
+  reintenta **una sola vez** con un nonce nuevo (nunca en trading);
+- la llave es **solo para Muse**: si otra app o bot la usa con otro tipo de
+  nonce, deja de funcionar aquí (hay que crear otra).
+
+### Seguridad de Kraken
+
+- Las claves de Kraken solo viven en variables de entorno del servidor. No
+  están en el código, no se escriben en archivos y no se registran en los
+  logs. Tampoco la llave de Muse ni las firmas: los logs de Kraken guardan
+  solo el nombre del método, el código de error de Kraken y el tiempo.
+- El panel nunca muestra saldos ni el IBAN que devuelve Kraken; de
+  `GetApiKeyInfo` solo usa los permisos, el nonce window, la caducidad y si
+  hay lista de IPs.
+- El panel avisa en rojo si la API key tiene permisos de retiro, y en
+  amarillo si puede operar mientras el trading está desactivado.
+- La llave de GoHighLevel no abre Kraken y la de Kraken no abre GoHighLevel.
+- Si la llave de Muse para Kraken se filtra: crea una API key nueva en
+  Kraken, borra la anterior, cambia `KRAKEN_API_KEY` y `KRAKEN_API_SECRET` en
+  Vercel y haz Redeploy. La llave de Muse cambia sola.
+
+### Despliegue desde cero (otra cuenta de Vercel)
+
+Es el mismo proyecto que GoHighLevel (ver [Opción E — Vercel](#opción-e--vercel-serverless)):
+no hay nada extra que desplegar. Basta con añadir las variables de Kraken y
+hacer Redeploy. Sin Vercel (Docker/VPS), igual: las mismas variables en el
+`.env`.
+
 ## Estructura
 
 ```
@@ -555,8 +749,10 @@ src/
   metrics.js     tiempos por llamada (GHL vs proxy) para el panel
   admin.js       panel /admin: PIN, sesión, verificaciones en vivo
   admin/         frontend del panel (HTML/CSS/JS sin dependencias)
+  kraken/        Kraken: config, lista de métodos, firma, cliente, /api/kraken, panel
   logger.js      logs JSON: method, path, status, ms
-test/            node:test + GHL simulado
+test/            node:test + GHL y Kraken simulados
+test-sign.js     prueba de la firma de Kraken contra el ejemplo oficial (PASS/FAIL)
 scripts/
   smoke-test.sh        aceptación contra el deploy
   write-connection.sh  genera CONNECTION.md

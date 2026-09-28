@@ -15,6 +15,10 @@
   let lastOverviewOk = null; // Date of the last successful overview
   let offlineSince = null;
   let submitting = false;
+  let view = 'ghl'; // 'ghl' | 'kraken'
+  let lastKrakenChecks = null;
+  let krakenStarted = false; // first visit to the Kraken tab loads it
+  let krakenTimer = null;
 
   // ---------- helpers ----------
 
@@ -255,6 +259,7 @@
       return;
     }
     if (!lastChecks) return;
+    $('tab-ghl').querySelector('.switch-dot').dataset.state = lastChecks.overall;
     badge.dataset.state = lastChecks.overall;
     badge.replaceChildren(icon(ICON[lastChecks.overall]));
     $('status-title').textContent = TITLES[lastChecks.overall];
@@ -423,10 +428,12 @@
 
   function hideKey() {
     clearTimeout(keyTimer);
-    const node = $('proxy-key');
-    node.textContent = MASK;
-    node.classList.remove('is-revealed');
-    $('reveal-key').textContent = 'Mostrar';
+    clearTimeout(krakenTimer);
+    for (const [nodeId, buttonId] of [['proxy-key', 'reveal-key'], ['k-access-key', 'k-reveal-key']]) {
+      $(nodeId).textContent = MASK;
+      $(nodeId).classList.remove('is-revealed');
+      $(buttonId).textContent = 'Mostrar';
+    }
     $('new-key').hidden = true;
     $('new-key').textContent = '';
     $('copy-new-key').hidden = true;
@@ -448,10 +455,15 @@
   }
 
   async function copyKey() {
+    return copySecret(fetchKey, (key) => manualCopy(key));
+  }
+
+  /** Copies a secret fetched from the server; `fallback(key)` shows it selected if copying is blocked. */
+  async function copySecret(fetchSecret, fallback) {
     // Safari only allows clipboard writes started inside the tap, so hand it a pending item.
     if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write && window.isSecureContext) {
       let fetched = null;
-      const blob = fetchKey().then((key) => {
+      const blob = fetchSecret().then((key) => {
         fetched = key;
         return new Blob([key], { type: 'text/plain' });
       });
@@ -472,13 +484,13 @@
           toast('Llave copiada');
           return;
         }
-        if (fetched) return manualCopy(fetched);
+        if (fetched) return fallback(fetched);
       }
     }
     try {
-      const key = await fetchKey();
+      const key = await fetchSecret();
       if (await copyText(key)) toast('Llave copiada');
-      else manualCopy(key);
+      else fallback(key);
     } catch (err) {
       if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
       else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
@@ -505,6 +517,241 @@
     } catch {
       toast('No se pudo descargar. Usa «Copiar».', { error: true });
     }
+  }
+
+
+  // ---------- switch ----------
+
+  function savedView() {
+    if (location.hash === '#kraken') return 'kraken';
+    if (location.hash === '#ghl') return 'ghl';
+    try {
+      return localStorage.getItem('panel-view') === 'kraken' ? 'kraken' : 'ghl';
+    } catch {
+      return 'ghl';
+    }
+  }
+
+  function setView(next) {
+    view = next === 'kraken' ? 'kraken' : 'ghl';
+    for (const name of ['ghl', 'kraken']) {
+      const active = name === view;
+      $(`view-${name}`).hidden = !active;
+      $(`tab-${name}`).setAttribute('aria-selected', String(active));
+      $(`tab-${name}`).tabIndex = active ? 0 : -1;
+    }
+    try {
+      localStorage.setItem('panel-view', view);
+    } catch {
+      // private mode: the choice just is not remembered
+    }
+    if (view === 'kraken') {
+      if (!krakenStarted) {
+        krakenStarted = true;
+        runKrakenChecks();
+      }
+      refreshKraken();
+    } else {
+      refresh();
+    }
+  }
+
+  // ---------- Kraken ----------
+
+  const K_TITLES = {
+    ok: 'Kraken funciona',
+    warn: 'Kraken funciona, con avisos',
+    fail: 'Kraken tiene un problema',
+    setup: 'Falta configurar Kraken',
+    missing: 'Kraken no está disponible',
+  };
+  const K_SUBS = {
+    ok: 'Las claves, la firma y el proxy responden bien. Muse puede usarlo.',
+    warn: 'Lo esencial funciona. Revisa los avisos de abajo.',
+    fail: 'Revisa el punto en rojo. Muse no podrá usar Kraken hasta corregirlo.',
+    setup: 'Sigue los 3 pasos de abajo (unos 5 minutos). GoHighLevel sigue funcionando igual.',
+    missing: 'Este servidor todavía no tiene la parte de Kraken.',
+  };
+
+  function renderKrakenStatus(state, when) {
+    const badge = $('k-status-badge');
+    const iconState = state === 'setup' || state === 'missing' ? 'warn' : state;
+    badge.dataset.state = iconState;
+    badge.replaceChildren(icon(ICON[iconState] || ICON.warn));
+    $('tab-kraken').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state;
+    $('k-status-title').textContent = K_TITLES[state];
+    $('k-status-sub').textContent = `${K_SUBS[state]}${when ? ` Verificado ${ago(when)}.` : ''}`;
+  }
+
+  function permItem(p) {
+    return el(
+      'li',
+      { class: 'perm', 'data-state': p.state },
+      stateIcon(p.state),
+      el('div', {}, el('div', { class: 'perm-name', text: p.label }), p.detail ? el('div', { class: 'perm-detail', text: p.detail }) : null),
+    );
+  }
+
+  function renderKrakenChecks(result) {
+    lastKrakenChecks = result;
+    renderKrakenStatus(result.overall, new Date(result.ranAt));
+    $('k-checks').replaceChildren(
+      ...result.checks.map((c) =>
+        el(
+          'li',
+          { class: 'check', 'data-state': c.status },
+          stateIcon(c.status),
+          el('div', {}, el('div', { class: 'check-label', text: c.label }), el('div', { class: 'check-detail', text: c.detail })),
+          el('span', { class: 'check-ms', text: c.ms === null ? '' : fmtMs(c.ms) }),
+        ),
+      ),
+    );
+    if (result.key) {
+      $('k-perms').replaceChildren(...result.key.permissions.map(permItem));
+      $('k-notes').replaceChildren(...result.key.notes.map(permItem));
+    } else {
+      $('k-perms').replaceChildren(el('li', { class: 'perm-empty muted small', text: 'Aparecerán cuando las claves estén puestas y verificadas.' }));
+      $('k-notes').replaceChildren();
+    }
+  }
+
+  async function runKrakenChecks() {
+    const button = $('k-run-checks');
+    button.disabled = true;
+    button.textContent = 'Verificando…';
+    $('k-status-badge').dataset.state = 'pending';
+    try {
+      const { status, data } = await api('/kraken/checks', { method: 'POST' });
+      if (status === 200 && data) renderKrakenChecks(data);
+      else if (status === 404) renderKrakenStatus('missing');
+      else toast('No se pudo verificar Kraken. Intenta de nuevo.', { error: true });
+    } catch (err) {
+      if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Verificar ahora';
+      if (!lastKrakenChecks && $('k-status-badge').dataset.state === 'pending') $('k-status-badge').dataset.state = 'warn';
+      refreshKraken();
+    }
+  }
+
+  function renderKrakenOverview(o) {
+    $('k-setup').hidden = o.configured;
+    $('k-connect').hidden = !o.configured;
+    $('k-problems').hidden = !(o.started && o.problems.length);
+    $('k-problems').replaceChildren(...o.problems.map((p) => el('li', { text: p })));
+    if (o.configured) {
+      $('k-muse-message').textContent = o.museMessage;
+      $('k-health-url').textContent = o.connection.health_url;
+    }
+
+    const mode = $('k-mode');
+    mode.dataset.mode = o.trading ? 'trading' : 'read';
+    mode.textContent = o.trading ? 'Trading ACTIVADO' : 'Solo lectura';
+    const trading = new Set(o.methods.trading);
+    $('k-methods').replaceChildren(...o.methods.allowed.map((m) => el('li', { class: trading.has(m) ? 'trading' : null, text: m })));
+    $('k-never').replaceChildren(...o.methods.never.map((m) => el('li', { text: m })));
+    $('k-security').replaceChildren(
+      el('dt', { text: 'Llave de Muse' }),
+      el('dd', { text: o.key ? `${o.key.length} caracteres (${o.key.source === 'env' ? 'KRAKEN_PROXY_KEY' : 'hecha con tus 2 claves'})` : '—' }),
+      el('dt', { text: 'API key de Kraken' }),
+      el('dd', { text: o.key ? `${o.key.apiKeyHint} (nunca sale del servidor)` : 'Sin poner' }),
+      el('dt', { text: 'Límite de llamadas' }),
+      el('dd', { text: `${o.rateLimit.max} por minuto` }),
+      el('dt', { text: 'Dirección' }),
+      el('dd', { text: o.connection.kraken_host }),
+    );
+
+    const m = o.metrics;
+    const chips = [
+      ['Llamadas de Muse', m.calls, ''],
+      ['Correctas', m.ok, ''],
+      ['Error de Kraken', m.krakenErrors, m.krakenErrors ? 'warn' : ''],
+      ['Método bloqueado', m.rejectedMethod, m.rejectedMethod ? 'warn' : ''],
+      ['Llave incorrecta', m.rejectedKey, m.rejectedKey ? 'warn' : ''],
+      ['Frenadas por el límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
+      ['Sin respuesta de Kraken', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
+    ];
+    $('k-counters').replaceChildren(...chips.map(([label, value, tone]) => el('span', { class: `chip ${tone}` }, el('strong', { text: fmtNum(value) }), label)));
+    $('k-activity').replaceChildren(
+      ...(m.recent.length
+        ? m.recent.map((r) =>
+            el(
+              'tr',
+              {},
+              el('td', { class: 'time', text: fmtTime(r.at) }),
+              el('td', { class: 'kmethod', text: r.method || '—' }),
+              el('td', { class: 'num' }, el('span', { class: `status-pill s${String(r.status)[0]}`, text: String(r.status) })),
+              el('td', { class: `result${r.error ? ' is-error' : ''}`, text: r.error || 'OK' }),
+              el('td', { class: 'num col-total', text: fmtMs(r.krakenMs) }),
+            ),
+          )
+        : [el('tr', {}, el('td', { class: 'empty', colspan: 5, text: 'Todavía no hay llamadas de Muse a Kraken.' }))]),
+    );
+    $('k-activity-updated').textContent = `Actualizado ${fmtTime(new Date())}`;
+    if (!lastKrakenChecks && !o.configured) renderKrakenStatus('setup');
+  }
+
+  async function refreshKraken() {
+    try {
+      const { status, data } = await api('/kraken/overview');
+      if (status === 200 && data) renderKrakenOverview(data);
+      else if (status === 404) renderKrakenStatus('missing');
+    } catch {
+      // the GHL status already reports connection problems
+    }
+  }
+
+  function showKrakenKey(key) {
+    const node = $('k-access-key');
+    node.textContent = key;
+    node.classList.add('is-revealed');
+    $('k-reveal-key').textContent = 'Ocultar';
+    clearTimeout(krakenTimer);
+    krakenTimer = setTimeout(hideKey, KEY_VISIBLE_MS);
+  }
+
+  async function fetchKrakenKey() {
+    const { status, data } = await api('/kraken/key', { method: 'POST' });
+    if (status !== 200 || !data || !data.accessKey) throw new Error('key');
+    return data.accessKey;
+  }
+
+  function wireKraken() {
+    for (const name of ['ghl', 'kraken']) $(`tab-${name}`).addEventListener('click', () => setView(name));
+    $('tab-ghl').parentElement.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      setView(view === 'ghl' ? 'kraken' : 'ghl');
+      $(`tab-${view}`).focus();
+    });
+    $('k-run-checks').addEventListener('click', runKrakenChecks);
+    $('k-copy-muse').addEventListener('click', async () => {
+      const text = $('k-muse-message').textContent;
+      if (!text || text === '—') return toast('Espera un segundo: el mensaje aún se está cargando.', { error: true });
+      if (await copyText(text)) {
+        toast('Mensaje copiado. Pégalo en Muse.');
+      } else {
+        $('k-muse-message').closest('details').open = true;
+        selectNode($('k-muse-message'));
+        toast('Tu navegador no dejó copiar. El mensaje está seleccionado: mantén pulsado para copiarlo.', { error: true });
+      }
+    });
+    $('k-reveal-key').addEventListener('click', async () => {
+      if ($('k-access-key').classList.contains('is-revealed')) return hideKey();
+      try {
+        showKrakenKey(await fetchKrakenKey());
+      } catch (err) {
+        if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+        else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
+      }
+    });
+    $('k-copy-key').addEventListener('click', () =>
+      copySecret(fetchKrakenKey, (key) => {
+        showKrakenKey(key);
+        selectNode($('k-access-key'));
+        toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
+      }),
+    );
   }
 
   // ---------- wiring ----------
@@ -567,9 +814,10 @@
         toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
       }
     });
+    wireKraken();
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) hideKey();
-      else if (!$('app').hidden) refresh();
+      else if (!$('app').hidden) refreshActive();
     });
   }
 
@@ -578,8 +826,14 @@
     $('app').hidden = false;
     refresh();
     runChecks();
+    setView(savedView());
     stopRefresh();
-    refreshTimer = setInterval(refresh, REFRESH_MS);
+    refreshTimer = setInterval(refreshActive, REFRESH_MS);
+  }
+
+  function refreshActive() {
+    if (view === 'kraken') refreshKraken();
+    else refresh();
   }
 
   async function boot() {

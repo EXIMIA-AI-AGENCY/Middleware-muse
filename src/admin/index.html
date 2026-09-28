@@ -26,7 +26,7 @@
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 16h14M17 10l6 6-6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <div>
           <h1>ghl-proxy</h1>
-          <p class="muted">GoHighLevel ↔ Muse</p>
+          <p class="muted">GoHighLevel · Kraken ↔ Muse</p>
         </div>
       </div>
       <label for="pin" class="pin-label"><svg class="icon"><use href="#i-lock"/></svg> Ingresa tu PIN</label>
@@ -58,7 +58,13 @@
       <button id="logout" type="button" class="btn btn-ghost">Salir</button>
     </header>
 
-    <main class="grid">
+    <!-- Switch -->
+    <div class="switch" role="tablist" aria-label="Servicio">
+      <button type="button" role="tab" id="tab-ghl" class="switch-btn" data-view="ghl" aria-selected="true" aria-controls="view-ghl"><span class="switch-dot" aria-hidden="true"></span>GoHighLevel</button>
+      <button type="button" role="tab" id="tab-kraken" class="switch-btn" data-view="kraken" aria-selected="false" aria-controls="view-kraken" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>Kraken</button>
+    </div>
+
+    <main class="grid" id="view-ghl" role="tabpanel" aria-labelledby="tab-ghl">
       <!-- Estado -->
       <section class="card card-status" aria-labelledby="status-title">
         <div class="status-head">
@@ -141,7 +147,7 @@
           <summary>Cambiar la llave del proxy</summary>
           <ol class="rotate-steps small">
             <li>Genera una llave nueva aquí. Se crea en este dispositivo y no se envía a ningún servidor.</li>
-            <li>En Railway → servicio → <strong>Variables</strong>, pega la llave en <code>PROXY_KEY</code> y pulsa <strong>Deploy</strong>.</li>
+            <li>En Vercel → proyecto → <strong>Settings → Environment Variables</strong>, pega la llave en <code>PROXY_KEY</code> y haz <strong>Redeploy</strong>.</li>
             <li>Cuando el panel vuelva a abrir (el reinicio cierra la sesión), entrega la llave nueva a Muse en su tarjeta segura.</li>
           </ol>
           <code id="new-key" class="code code-inline" hidden></code>
@@ -166,6 +172,131 @@
           </table>
         </div>
         <p class="muted small">Solo se guarda el tipo de llamada, la ruta, el resultado y el tiempo. Nunca datos de tus contactos ni claves.</p>
+      </section>
+    </main>
+
+    <!-- Kraken -->
+    <main class="grid" id="view-kraken" role="tabpanel" aria-labelledby="tab-kraken" hidden>
+      <!-- Estado -->
+      <section class="card card-status" aria-labelledby="k-status-title">
+        <div class="status-head">
+          <div id="k-status-badge" class="status-badge" data-state="pending" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></div>
+          <div class="status-text">
+            <h2 id="k-status-title">Verificando…</h2>
+            <p id="k-status-sub" class="muted">Probando las claves de Kraken, la firma y el proxy.</p>
+          </div>
+          <button id="k-run-checks" type="button" class="btn">Verificar ahora</button>
+        </div>
+        <ul id="k-checks" class="checklist" aria-live="polite"></ul>
+      </section>
+
+      <!-- Configurar -->
+      <section class="card card-wide card-setup" id="k-setup" aria-labelledby="k-setup-title" hidden>
+        <h2 id="k-setup-title">Configurar Kraken (una sola vez)</h2>
+        <ul id="k-problems" class="problems" hidden></ul>
+        <ol class="steps">
+          <li>
+            <h3>Crea una API key en Kraken, solo para Muse</h3>
+            <p class="muted small">Kraken → tu perfil → <strong>Settings → API</strong> → <strong>Create API key</strong>. Ponle de nombre «Muse».</p>
+            <ul class="perm-guide small">
+              <li class="yes">Query Funds</li>
+              <li class="yes">Query Open Orders &amp; Trades</li>
+              <li class="yes">Query Closed Orders &amp; Trades</li>
+              <li class="yes">Query Ledger Entries</li>
+              <li class="no">Withdraw Funds, Deposit, Earn, Create &amp; Modify Orders, Cancel/Close Orders: <strong>desmarcados</strong></li>
+            </ul>
+            <p class="muted small">En <strong>Advanced</strong>, pon <strong>Nonce Window = 10000</strong>. Deja la lista de IPs vacía (Vercel no tiene una IP fija). Kraken muestra la <em>Private key</em> una sola vez: tenla a mano para el paso 2.</p>
+          </li>
+          <li>
+            <h3>Pégalas en Vercel (nunca en un chat)</h3>
+            <p class="muted small">Vercel → proyecto <strong>ghl-proxy-muse</strong> → <strong>Settings → Environment Variables</strong>. Añade dos variables, en <strong>Production</strong> y marcadas como <strong>Sensitive</strong>:</p>
+            <dl class="kv kv-left">
+              <dt><code>KRAKEN_API_KEY</code></dt><dd>la <strong>API key</strong> de Kraken</dd>
+              <dt><code>KRAKEN_API_SECRET</code></dt><dd>la <strong>Private key</strong> de Kraken</dd>
+            </dl>
+          </li>
+          <li>
+            <h3>Haz Redeploy y vuelve aquí</h3>
+            <p class="muted small">Vercel → <strong>Deployments</strong> → el último → <strong>⋯ → Redeploy</strong>. Al terminar, pulsa <strong>Verificar ahora</strong>: el panel unirá tus dos claves en <strong>una sola llave</strong> para Muse. GoHighLevel no se toca.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Conectar Muse -->
+      <section class="card card-wide card-connect" id="k-connect" aria-labelledby="k-connect-title" hidden>
+        <h2 id="k-connect-title">Conectar Muse a Kraken</h2>
+        <ol class="steps">
+          <li>
+            <h3>Copia este mensaje y pégalo en Muse</h3>
+            <p class="muted small">Tiene todo lo que Muse necesita: dirección, métodos, cómo verificar y reglas de Kraken. No contiene ningún secreto.</p>
+            <div class="actions">
+              <button type="button" class="btn btn-primary btn-wide" id="k-copy-muse">Copiar mensaje para Muse</button>
+            </div>
+            <details class="preview">
+              <summary>Ver el mensaje</summary>
+              <pre id="k-muse-message" class="code code-scroll" tabindex="0">—</pre>
+            </details>
+          </li>
+          <li>
+            <h3>Cuando Muse te pida la llave de Kraken, pégala en su tarjeta segura</h3>
+            <p class="muted small">Es <strong>una sola llave</strong>, hecha a partir de tus dos claves de Kraken (que nunca salen del servidor). Es distinta de la de GoHighLevel. Pégala solo en la tarjeta segura de Muse: nunca en el chat.</p>
+            <div class="secret">
+              <code id="k-access-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn" id="k-reveal-key">Mostrar</button>
+              <button type="button" class="btn" id="k-copy-key">Copiar llave</button>
+            </div>
+          </li>
+          <li>
+            <h3>Muse verifica sola</h3>
+            <p class="muted small">Muse comprobará <code id="k-health-url">/api/kraken?health=1</code> y pedirá su saldo de prueba. Lo verás abajo, en <strong>Actividad en Kraken</strong>.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Métodos -->
+      <section class="card card-methods" aria-labelledby="k-methods-title">
+        <div class="card-head">
+          <h2 id="k-methods-title">Qué puede hacer Muse</h2>
+          <span id="k-mode" class="mode-badge"></span>
+        </div>
+        <ul id="k-methods" class="method-list"></ul>
+        <p class="kv-title small">Bloqueados siempre, en cualquier configuración</p>
+        <ul id="k-never" class="method-list method-never"></ul>
+        <dl class="kv" id="k-security"></dl>
+      </section>
+
+      <!-- Llave -->
+      <section class="card card-kkey" aria-labelledby="k-key-title">
+        <h2 id="k-key-title">Permisos de la llave de Kraken</h2>
+        <p class="muted small">Lo que Kraken permite a esta llave. Se cambian en Kraken → Settings → API, sin tocar Vercel.</p>
+        <ul id="k-perms" class="perm-list perm-list-1"></ul>
+        <ul id="k-notes" class="perm-list perm-list-1"></ul>
+        <details class="rotate">
+          <summary>Cambiar las claves de Kraken</summary>
+          <ol class="rotate-steps small">
+            <li>Crea una API key nueva en Kraken (mismos permisos y Nonce Window 10000) y borra la anterior.</li>
+            <li>En Vercel, reemplaza <code>KRAKEN_API_KEY</code> y <code>KRAKEN_API_SECRET</code> y haz <strong>Redeploy</strong>.</li>
+            <li>La llave de Muse cambia sola: cópiala otra vez aquí y dásela a Muse en su tarjeta segura.</li>
+          </ol>
+        </details>
+      </section>
+
+      <!-- Actividad -->
+      <section class="card card-wide" aria-labelledby="k-activity-title">
+        <div class="card-head">
+          <h2 id="k-activity-title">Actividad en Kraken</h2>
+          <span class="muted small" id="k-activity-updated"></span>
+        </div>
+        <div class="counters" id="k-counters"></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Hora</th><th>Método</th><th class="num">Estado</th><th>Resultado</th><th class="num col-total" title="Tiempo que tardó Kraken en responder">Kraken</th></tr></thead>
+            <tbody id="k-activity"></tbody>
+          </table>
+        </div>
+        <p class="muted small">Solo se guarda el método, el resultado y el tiempo. Nunca saldos, órdenes ni claves.</p>
       </section>
     </main>
     <footer class="footer muted small" id="footer"></footer>
