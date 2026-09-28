@@ -939,10 +939,12 @@ Muse --(X-Proxy-Key: llave de Stripe)--> /stripe/v1/* --(Bearer <clave de Stripe
 
 ### Fiabilidad
 
-- **Idempotency-Key en cada escritura.** Cada POST (y los DELETE de /v2) lleva
-  un `Idempotency-Key`: el de Muse o uno que pone el proxy y devuelve en
-  `X-Proxy-Idempotency-Key`. Con la misma clave y el mismo cuerpo, Stripe nunca
-  repite la acción: devuelve el primer resultado (`Idempotent-Replayed: true`).
+- **Idempotency-Key obligatorio en cada escritura.** Cada POST (y los DELETE
+  de /v2) debe traer el `Idempotency-Key` de Muse (un UUID por acción, el mismo
+  en cada reintento); sin él el proxy responde `400 idempotency_key_required` y
+  no envía nada. Así, aunque se pierda una respuesta, Muse puede repetir con la
+  misma clave y Stripe nunca hace la acción dos veces (`Idempotent-Replayed: true`).
+  El proxy lo devuelve en `X-Proxy-Idempotency-Key`.
 - **Reintentos seguros, con las reglas de Stripe:** conexión perdida,
   `Stripe-Should-Retry: true`, 409, 429 sin `Stripe-Rate-Limited-Reason`
   (bloqueo interno) y 5xx (salvo `Stripe-Should-Retry: false`), hasta 2
@@ -951,8 +953,11 @@ Muse --(X-Proxy-Key: llave de Stripe)--> /stripe/v1/* --(Bearer <clave de Stripe
   cuántos intentos hubo.
 - **Qué pasó exactamente:** cada error de Stripe vuelve tal cual más un objeto
   `proxy` en español (`summary`, `executed` yes/no/unknown, `safe_to_retry`,
-  `next`, `idempotency_key`). Las respuestas propias del proxy usan el mismo
-  formato con `error.type = "proxy_error"`.
+  `next`, `idempotency_key`). Si un intento anterior pudo hacerse (respuesta
+  perdida, 409, `idempotency_error`), `executed` es `unknown`, nunca `no`. Las
+  respuestas propias del proxy usan el mismo formato con
+  `error.type = "proxy_error"`; un error de Stripe que no sea JSON también llega
+  envuelto con la explicación.
 - **JSON aceptado en /v1:** Stripe espera `x-www-form-urlencoded`; si Muse
   manda JSON, el proxy lo convierte como las librerías oficiales
   (`items[0][price]=…`) y lo indica en `X-Proxy-Converted`.
@@ -970,12 +975,16 @@ decodificado una vez, en minúsculas). Una ruta ambigua (`%2F`, `//`, `.`/`..`,
   devoluciones de comisiones de aplicación, cuentas bancarias de destino
   (`external_accounts`, `bank_accounts`, `/v2/core/vault`), `balance_settings`,
   borrar o rechazar cuentas conectadas, Treasury saliente, tarjetas de Issuing,
-  Climate, movimientos de dinero de `/v2/money_management`, y crear o cambiar
-  cuentas conectadas con `external_account`, `bank_account` o
-  `settings[payouts]` (también en la query o en JSON).
+  Climate, crear o cambiar cuentas y titulares de Treasury e Issuing,
+  reactivar tokens de wallet, `credit_reversals`, movimientos de dinero de
+  `/v2/money_management`, y crear o cambiar cuentas conectadas con
+  `external_account`, `bank_account`, `settings[payouts]` o sus nombres antiguos
+  (`payout_schedule`…), también en la query o en JSON. En esas rutas los
+  parámetros deben tener la forma normal de Stripe (`a[b]`, sin `;`).
 - **Accesos permanentes** (se permite con `STRIPE_ALLOW_ACCESS_GRANTS=true`):
   webhooks y destinos de eventos (crearlos, cambiarlos o borrarlos podría
-  romper integraciones ya conectadas o sacar datos), enlaces públicos a
+  romper integraciones ya conectadas o sacar datos), leer el número completo o
+  el CVC de tarjetas de Issuing (`expand[]=number|cvc`), enlaces públicos a
   archivos, enlaces de alta y de acceso a cuentas, sesiones de cuenta, claves
   efímeras, reenvío de datos de tarjeta, secretos de apps, gestión de claves y
   operaciones masivas.

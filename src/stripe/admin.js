@@ -48,7 +48,8 @@ function stripeMessage(res) {
 function readRefusal(res, perm) {
   const body = parseJson(res.text);
   const code = body && body.error && body.error.code;
-  if (res.status === 0) return `No se pudo llamar a Stripe (${res.error}).`;
+  if (res.status === 0) return `No se pudo llamar a Stripe ahora (${res.error}). Vuelve a verificar en un momento.`;
+  if (res.status === 429 || res.status >= 500) return `Stripe no pudo responder ahora (${stripeMessage(res)}). No es un problema de la clave: vuelve a verificar en un momento.`;
   if (res.status === 401) return 'Stripe no acepta la clave: cópiala de nuevo en STRIPE_SECRET_KEY y haz Redeploy.';
   if (res.status === 403) return `Falta el permiso «${perm}» (Read) en la clave restringida.`;
   if (res.status === 400 && /inactive|not_active|platform_account_required/.test(code || '')) return 'Ese producto de Stripe no está activado en la cuenta (normal si no lo usas).';
@@ -101,7 +102,7 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 2. Crea la skill \`~/workspace/skills/stripe/\` con un cliente \`bin/stripe-proxy\`: \`${base}/<ruta>\`, donde <ruta> es exactamente la del API de Stripe (lo que iría después de https://api.stripe.com), por ejemplo \`${base}/v1/customers?limit=10\`. No envíes la clave de Stripe ni el header Authorization: el proxy los pone.
 3. Verifica, en este orden:
    a. \`GET ${info.health_url}\` → \`{"ok": true, ...}\`
-   b. \`GET ${base}/v1/balance\` con \`X-Proxy-Key\` → 200 con \`"object": "balance"\` (\`livemode\` ${live ? 'true' : 'false'}).
+   b. \`GET ${base}/v1/balance\` con \`X-Proxy-Key\` → 200 con \`"object": "balance"\` (\`livemode\` ${live ? 'true' : 'false'}). No hace falta que me digas el saldo.
    c. \`GET ${base}/v1/customers?limit=3\` → 200 con \`"data"\`.
 4. Confírmame en una línea que quedó conectado y en qué modo (live o test).
 
@@ -109,7 +110,7 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 
 - Métodos: GET para leer, POST para crear o cambiar, DELETE para borrar (no hay PUT ni PATCH).
 - Cuerpo de /v1: \`application/x-www-form-urlencoded\` (\`metadata[pedido]=123\`, \`items[0][price]=price_...\`, \`expand[]=customer\`). También puedes mandar JSON: el proxy lo convierte al formato de Stripe (verás \`X-Proxy-Converted: json-to-form\`). Para /v2 usa JSON.
-- Importes en la unidad más pequeña de la moneda y como entero: 10,50 USD = \`amount=1050\`, \`currency=usd\` (minúsculas).
+- Importes en la unidad más pequeña de la moneda y como entero: 10,50 USD = \`amount=1050\`, \`currency=usd\` (minúsculas). OJO: en monedas sin decimales (jpy, krw, clp, vnd, xof…) el importe va tal cual: 1000 JPY = \`amount=1000\`. Si dudas, pregúntame antes de cobrar.
 - Listas: \`limit\` de 1 a 100 (por defecto 10) y \`has_more\`; para la página siguiente usa \`starting_after=<id del último>\`.
 - Búsqueda: \`GET ${base}/v1/customers/search?query=email:"ana@ejemplo.com"\` (también charges, invoices, payment_intents, prices, products, subscriptions). Tarda hasta ~1 min en ver lo recién creado; para leer lo que acabas de crear usa su ID. Paginación con \`page=<next_page>\`.
 - \`expand[]=...\` trae objetos relacionados (máximo 4 niveles).
@@ -117,12 +118,13 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 - Cuentas conectadas (Connect): header \`Stripe-Account: acct_...\`.
 - Subir archivos (\`/v1/files\`) no pasa por aquí: va a otro servidor de Stripe.
 
-## Reintentos seguros (Idempotency-Key)
+## Reintentos seguros (Idempotency-Key) — OBLIGATORIO
 
-- Cada POST lleva un \`Idempotency-Key\`. Si no mandas uno, el proxy pone uno y te lo devuelve en \`X-Proxy-Idempotency-Key\`.
+- Cada POST (y cada DELETE de /v2) DEBE llevar tu propio header \`Idempotency-Key\`: genera un UUID v4 nuevo por cada acción distinta y guárdalo ANTES de enviar. Sin él, el proxy responde 400 \`idempotency_key_required\` y no envía nada.
 - Con el mismo \`Idempotency-Key\` y el mismo cuerpo, Stripe NUNCA hace la acción dos veces: devuelve el primer resultado (\`Idempotent-Replayed: true\`). Vale 24 h.
-- El proxy ya reintenta solo cuando es seguro. Si aun así no te llega respuesta, repite la petición con el MISMO cuerpo y el MISMO \`Idempotency-Key\`; nunca con uno nuevo.
-- Si Stripe rechazó la petición (4xx) y la corriges, mándala sin \`Idempotency-Key\` o con uno nuevo.
+- El proxy ya reintenta solo cuando es seguro. Si aun así no te llega respuesta (timeout, conexión cortada, 502/504), repite la petición con el MISMO cuerpo y el MISMO \`Idempotency-Key\`; nunca con uno nuevo.
+- Si Stripe rechazó la petición (4xx) y la corriges, mándala con un \`Idempotency-Key\` NUEVO.
+- Si Stripe responde \`idempotency_error\`, esa clave ya se usó con otros datos: la petición original YA se procesó. Comprueba qué se hizo antes de mandar nada más.
 
 ## Qué significa cada respuesta (campo \`proxy\`)
 
@@ -200,6 +202,8 @@ function createStripeChecks({ config, client, getSelfUrl, call, ghlConfig, ghlCh
       } else if (balance.status === 403) {
         keyOk = true;
         add('key', 'Clave válida', 'warn', 'Stripe la acepta, pero no puede leer el saldo: falta el permiso «Balance» (Read).', balance.ms);
+      } else if (balance.status === 0 || balance.status === 429 || balance.status >= 500) {
+        add('key', 'Clave válida', 'warn', readRefusal(balance, 'Balance'), balance.ms);
       } else {
         add('key', 'Clave válida', 'fail', readRefusal(balance, 'Balance'), balance.ms);
       }
@@ -238,7 +242,7 @@ function createStripeChecks({ config, client, getSelfUrl, call, ghlConfig, ghlCh
           const res = results[i];
           if (!res) permissions.push({ id: p.id, label: p.label, perm: p.perm, state: 'info', detail: 'No se probó (tiempo agotado).' });
           else if (ok2xx(res)) permissions.push({ id: p.id, label: p.label, perm: p.perm, state: 'ok', detail: 'Acceso OK' });
-          else if (res.status === 400) permissions.push({ id: p.id, label: p.label, perm: p.perm, state: 'info', detail: readRefusal(res, p.perm) });
+          else if (res.status === 400 || res.status === 0 || res.status === 429 || res.status >= 500) permissions.push({ id: p.id, label: p.label, perm: p.perm, state: 'info', detail: readRefusal(res, p.perm) });
           else permissions.push({ id: p.id, label: p.label, perm: p.perm, state: 'warn', detail: readRefusal(res, p.perm) });
         });
         const missing = permissions.filter((p) => p.state === 'warn');

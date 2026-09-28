@@ -30,9 +30,11 @@ const MONEY_OUT = [
   { methods: ['DELETE'], re: R(`/v1/accounts/${SEG}`), what: 'borrar una cuenta conectada' },
   { methods: ['POST'], re: R(`/v1/accounts/${SEG}/reject`), what: 'rechazar una cuenta conectada' },
   { methods: ['POST'], re: R('/v1/balance_settings'), what: 'cambiar el calendario o el destino de los payouts' },
-  { methods: ['POST'], re: R('/v1/treasury/(outbound_payments|outbound_transfers)'), what: 'enviar dinero desde Treasury' },
-  { methods: ['POST'], re: R(`/v1/treasury/financial_accounts/${SEG}/(close|features)`), what: 'cerrar o cambiar una cuenta de Treasury' },
+  { methods: ['POST'], re: R('/v1/treasury/(outbound_payments|outbound_transfers|credit_reversals)'), what: 'enviar dinero desde Treasury' },
+  { methods: ['POST'], re: R(`/v1/treasury/financial_accounts(/${SEG}(/(close|features))?)?`), what: 'crear, cambiar o cerrar una cuenta de Treasury' },
   { methods: ['POST'], re: R(`/v1/issuing/cards(/${SEG})?`), what: 'crear o cambiar una tarjeta que gasta del saldo' },
+  { methods: ['POST'], re: R(`/v1/issuing/cardholders(/${SEG})?`), what: 'crear o cambiar un titular de tarjetas (estado y límites de gasto)' },
+  { methods: ['POST'], re: R(`/v1/issuing/tokens/${SEG}`), what: 'reactivar una tarjeta en Apple Pay o Google Pay' },
   { methods: ['POST'], re: R(`/v1/issuing/authorizations/${SEG}/approve`), what: 'aprobar un gasto de tarjeta' },
   { methods: ['POST'], re: R('/v1/climate/orders'), what: 'comprar Stripe Climate con el saldo' },
   { methods: ['POST'], re: R('/v2/money_management/(outbound_payments|outbound_transfers|outbound_payment_quotes)'), what: 'enviar dinero fuera (v2)' },
@@ -63,10 +65,17 @@ const ACCESS = [
   { methods: ['POST'], re: R(`/v2/extend/workflows/${SEG}/invoke`), what: 'lanzar un workflow de Stripe' },
 ];
 
-// Connected-account create/update: blocked only when the body sets where payouts go.
-const ACCOUNT_ROUTES = [R('/v1/accounts'), R(`/v1/accounts/${SEG}`), R('/v2/core/accounts'), R(`/v2/core/accounts/${SEG}`)];
-const V1_ACCOUNT_KEYS = /^(external_account|bank_account|settings\[payouts\]|settings\[treasury\]|capabilities\[(transfers|treasury|card_issuing)\])/;
+// Connected-account create/update: blocked only when the parameters set where payouts go
+// (current names, and the older ones Stripe still accepts under older API versions).
+const V1_ACCOUNT_ROUTES = [R('/v1/accounts'), R(`/v1/accounts/${SEG}`)];
+const V2_ACCOUNT_ROUTES = [R('/v2/core/accounts'), R(`/v2/core/accounts/${SEG}`)];
+const V1_ACCOUNT_KEYS = /^(external_account|bank_account|settings\[payouts\]|settings\[treasury\]|capabilities\[(transfers|treasury|card_issuing)\]|payout_schedule|transfer_schedule|debit_negative_balances|payout_statement_descriptor)/;
 const V2_ACCOUNT_KEYS = /(^|\.)(payout_methods|default_outbound_destination|outbound_payments|outbound_transfers)(\.|$)/;
+// Issuing cards reveal the full card number and CVC only when asked to expand them.
+const ISSUING_CARDS = R(`/v1/issuing/cards(/${SEG})?`);
+const SECRET_EXPAND = /(^|\.)(number|cvc)$/;
+// Parameter names exactly as Stripe writes them (a[b][0]); anything else could be read two ways.
+const CANONICAL_KEY = /^[A-Za-z0-9_]+(\[[A-Za-z0-9_]*\])*$/;
 
 const INVALID_SEGMENT = /[/\\;\x00-\x1f\x7f]/;
 
@@ -107,29 +116,41 @@ function jsonKeys(value, prefix = '', out = []) {
   return out;
 }
 
+const dotted = (name) => name.replace(/\[([^\]]*)\]/g, '.$1');
+
 /**
  * The rule this request breaks, if any: { tier: 'money_out' | 'access', what }.
- * `fields` are the request's parameter names (form keys, or dotted JSON keys for v2), from
- * both the query string and the body.
+ * `params` are the request's parameters as [name, value] pairs, from both the query string
+ * and the body (form names like a[b][0], or dotted names for JSON).
  */
-function blockedBy(method, path, fields, { allowMoneyOut, allowAccessGrants }) {
+function blockedBy(method, path, params, { allowMoneyOut, allowAccessGrants }) {
+  const names = params.map(([name]) => name);
   if (!allowMoneyOut) {
     const rule = MONEY_OUT.find((r) => r.methods.includes(method) && r.re.test(path));
     if (rule) return { tier: 'money_out', what: rule.what };
-    if (method === 'POST' && ACCOUNT_ROUTES.some((re) => re.test(path))) {
-      const keys = path.startsWith('/v2/') ? V2_ACCOUNT_KEYS : V1_ACCOUNT_KEYS;
-      if (fields.some((f) => keys.test(f))) return { tier: 'money_out', what: 'cambiar a dónde van los payouts de una cuenta conectada' };
+    if (method === 'POST' && V1_ACCOUNT_ROUTES.some((re) => re.test(path)) && names.some((n) => V1_ACCOUNT_KEYS.test(n))) {
+      return { tier: 'money_out', what: 'cambiar a dónde van los payouts de una cuenta conectada' };
+    }
+    if (method === 'POST' && V2_ACCOUNT_ROUTES.some((re) => re.test(path)) && names.some((n) => V2_ACCOUNT_KEYS.test(dotted(n)))) {
+      return { tier: 'money_out', what: 'cambiar a dónde van los payouts de una cuenta' };
     }
   }
   if (!allowAccessGrants) {
     const rule = ACCESS.find((r) => r.methods.includes(method) && r.re.test(path));
     if (rule) return { tier: 'access', what: rule.what };
+    if (ISSUING_CARDS.test(path) && params.some(([name, value]) => /^expand(\[|$)/.test(name) && SECRET_EXPAND.test(String(value)))) {
+      return { tier: 'access', what: 'leer el número completo o el CVC de una tarjeta' };
+    }
   }
   return null;
 }
 
-/** Whether this route's body must be read to decide (connected-account create/update). */
-const needsFields = (method, path) => method === 'POST' && ACCOUNT_ROUTES.some((re) => re.test(path));
+/** Whether this route's parameters must be read to decide. */
+const needsParams = (method, path) =>
+  (method === 'POST' && (V1_ACCOUNT_ROUTES.some((re) => re.test(path)) || V2_ACCOUNT_ROUTES.some((re) => re.test(path)))) || ISSUING_CARDS.test(path);
+
+/** Routes whose parameters must be written in one unambiguous way (v1 account create/update). */
+const strictParams = (method, path) => method === 'POST' && V1_ACCOUNT_ROUTES.some((re) => re.test(path));
 
 /**
  * JSON -> Stripe form encoding, the way Stripe's own libraries send it:
@@ -153,4 +174,12 @@ function toForm(value) {
   return params.toString();
 }
 
-module.exports = { stripePath, blockedBy, needsFields, toForm, jsonKeys, MONEY_OUT, ACCESS };
+/** Pairs of a JSON value as dotted names ("a.b.0.c") with their leaf values. */
+function jsonPairs(value, prefix = '', out = []) {
+  if (value && typeof value === 'object') {
+    for (const [key, inner] of Object.entries(value)) jsonPairs(inner, prefix ? `${prefix}.${key}` : key, out);
+  } else if (prefix) out.push([prefix, value]);
+  return out;
+}
+
+module.exports = { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, CANONICAL_KEY, MONEY_OUT, ACCESS };

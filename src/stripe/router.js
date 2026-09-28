@@ -6,7 +6,7 @@ const { sendJson } = require('../http-util');
 const { createTiming } = require('../metrics');
 const { HOP_BY_HOP } = require('./client');
 const { explainStripeError, explainNoAnswer } = require('./explain');
-const { stripePath, blockedBy, needsFields, toForm, jsonKeys } = require('./guard');
+const { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, CANONICAL_KEY } = require('./guard');
 
 const sha256 = (value) => crypto.createHash('sha256').update(value, 'utf8').digest();
 const same = (value, expectedHash) => typeof value === 'string' && value.length > 0 && crypto.timingSafeEqual(sha256(value), expectedHash);
@@ -29,8 +29,8 @@ const isForm = (type) => /^application\/x-www-form-urlencoded\b/i.test(type || '
  *
  * - Money out (payouts, transfers, payout destinations) and lasting access grants (webhooks,
  *   public file links, login links) are refused unless the owner allows them.
- * - Every write gets an Idempotency-Key (Muse's own, or one the proxy adds and returns in
- *   X-Proxy-Idempotency-Key), so it can be repeated without ever happening twice.
+ * - Every write must carry Muse's own Idempotency-Key, so it can be repeated (by the proxy
+ *   or by Muse) without ever happening twice.
  * - The proxy repeats a call itself only when Stripe's rules say it is safe.
  * - v1 bodies sent as JSON are converted to the form encoding Stripe expects.
  * - Stripe errors come back as Stripe sent them plus a `proxy` object in Spanish.
@@ -110,20 +110,31 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
         }
       }
 
+      // Reads never carry a body to Stripe.
+      if (req.method === 'GET') body = null;
+
       // Routes that are only dangerous with certain parameters: read them from query and body.
-      let fields = [];
-      if (needsFields(req.method, path)) {
-        fields = [...new URLSearchParams(query).keys()];
+      let params = [];
+      if (needsParams(req.method, path)) {
+        const strict = strictParams(req.method, path);
+        const pairs = (text) => [...new URLSearchParams(text).entries()];
+        if (strict && (query.includes(';') || (body && body.includes(';')))) {
+          return proxyError(res, 400, 'ambiguous_params', 'Los parámetros no pueden llevar ";". No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'no', next: 'Separa los parámetros solo con "&".' });
+        }
+        params = pairs(query);
         if (body) {
-          if (json && !v1) fields.push(...jsonKeys(json));
-          else if (isForm(headers['content-type'])) fields.push(...new URLSearchParams(body.toString('utf8')).keys());
+          if (json && !v1) params.push(...jsonPairs(json), ...jsonKeys(json).map((k) => [k, '']));
+          else if (isForm(headers['content-type'])) params.push(...pairs(body.toString('utf8')));
           else {
-            return proxyError(res, 415, 'unsupported_body', 'Para crear o cambiar cuentas conectadas manda el cuerpo como application/x-www-form-urlencoded o JSON. No se envió nada a Stripe.', { safe_to_retry: 'no', next: 'Reenvía con Content-Type application/x-www-form-urlencoded.' });
+            return proxyError(res, 415, 'unsupported_body', 'Para esta ruta manda el cuerpo como application/x-www-form-urlencoded o JSON. No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'no', next: 'Reenvía con Content-Type application/x-www-form-urlencoded.' });
           }
+        }
+        if (strict && params.some(([name]) => !CANONICAL_KEY.test(name))) {
+          return proxyError(res, 400, 'ambiguous_params', 'Algún parámetro no tiene la forma normal de Stripe (nombre o nombre[clave]). No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'no', next: 'Escribe los parámetros como external_account o metadata[clave].' });
         }
       }
 
-      const blocked = blockedBy(req.method, path, fields, config);
+      const blocked = blockedBy(req.method, path, params, config);
       if (blocked) {
         res.locals.blocked = true;
         logger.warn({ msg: 'stripe_blocked', tier: blocked.tier });
@@ -135,15 +146,25 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
         });
       }
 
-      // Writes carry an Idempotency-Key so repeating them can never act twice (v1: POST; v2: POST and DELETE).
+      // Writes must carry Muse's own Idempotency-Key (v1: POST; v2: POST and DELETE): if an
+      // answer is ever lost, Muse repeats with that same key and Stripe never acts twice.
       const keyed = req.method === 'POST' || (!v1 && req.method === 'DELETE');
-      let idempotencyKey = typeof headers['idempotency-key'] === 'string' && headers['idempotency-key'] ? headers['idempotency-key'] : null;
+      const given = typeof headers['idempotency-key'] === 'string' && headers['idempotency-key'].trim() ? headers['idempotency-key'].trim() : null;
+      const idempotencyKey = keyed ? given : null;
       if (keyed && !idempotencyKey) {
-        idempotencyKey = `muse-${crypto.randomUUID()}`;
-        headers['idempotency-key'] = idempotencyKey;
+        return proxyError(res, 400, 'idempotency_key_required', 'Falta el header Idempotency-Key. No se envió nada a Stripe.', {
+          executed: 'no',
+          safe_to_retry: 'yes',
+          next: 'Repite la petición con el header Idempotency-Key: un UUID nuevo por cada acción distinta, y el MISMO si repites esa acción.',
+        });
       }
-      if (idempotencyKey) extra['X-Proxy-Idempotency-Key'] = idempotencyKey;
-      if (!keyed) delete headers['idempotency-key'];
+      if (keyed && idempotencyKey.length > 255) {
+        return proxyError(res, 400, 'idempotency_key_too_long', 'El Idempotency-Key pasa de 255 caracteres. No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'yes', next: 'Usa un UUID.' });
+      }
+      if (keyed) {
+        headers['idempotency-key'] = idempotencyKey;
+        extra['X-Proxy-Idempotency-Key'] = idempotencyKey;
+      } else delete headers['idempotency-key'];
 
       const timing = createTiming(res.locals.startedAt);
       res.locals.timing = timing;
@@ -174,37 +195,42 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
       Object.assign(outHeaders, extra, { 'Cache-Control': 'no-store' });
       if (res.locals.check) outHeaders['X-Proxy-Overhead-Ms'] = timing.overheadSoFar().toFixed(2);
 
-      // Errors: Stripe's JSON plus the `proxy` explanation. Successes stream through untouched.
-      if (status >= 400 && isJson(upstream.headers['content-type']) && !upstream.headers['content-encoding']) {
+      // Errors: Stripe's answer plus the `proxy` explanation. Successes stream through untouched.
+      if (status >= 400) {
         const chunks = [];
         let size = 0;
-        for await (const chunk of upstream) {
-          size += chunk.length;
-          if (size > MAX_ERROR_BODY) {
-            upstream.destroy();
-            return proxyError(res, 502, 'bad_upstream_answer', 'Stripe devolvió un error demasiado grande para leerlo.', { safe_to_retry: 'after-wait', next: 'Vuelve a intentarlo en un momento.' }, extra);
-          }
-          chunks.push(chunk);
-        }
-        let parsed = null;
         try {
-          parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          for await (const chunk of upstream) {
+            size += chunk.length;
+            if (size > MAX_ERROR_BODY) break;
+            chunks.push(chunk);
+          }
         } catch {
-          parsed = null;
+          // The error answer broke off: Muse still gets the explanation below.
+          chunks.length = 0;
         }
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          parsed.proxy = explainStripeError({ method: req.method, status, headers: upstream.headers, body: parsed, idempotencyKey, attempts: result.attempts });
-          const payload = Buffer.from(JSON.stringify(parsed), 'utf8');
-          outHeaders['content-length'] = String(payload.length);
-          res.writeHead(status, outHeaders);
-          timing.relayed();
-          return res.end(payload);
+        if (size > MAX_ERROR_BODY) upstream.destroy();
+        const text = Buffer.concat(chunks).toString('utf8');
+        let parsed = null;
+        if (!upstream.headers['content-encoding']) {
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            parsed = null;
+          }
         }
-        const raw = Buffer.concat(chunks);
-        outHeaders['content-length'] = String(raw.length);
+        const proxy = explainStripeError({ method: req.method, status, headers: upstream.headers, body: parsed, idempotencyKey, attempts: result.attempts, maybeRan: result.maybeRan });
+        const answer =
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? { ...parsed, proxy }
+            : { error: { type: 'api_error', message: `Stripe respondió HTTP ${status} sin un error legible.` }, proxy, upstream_body: upstream.headers['content-encoding'] ? undefined : text.slice(0, 500) };
+        const payload = Buffer.from(JSON.stringify(answer), 'utf8');
+        for (const name of ['content-length', 'content-encoding', 'content-type']) delete outHeaders[name];
+        outHeaders['Content-Type'] = 'application/json; charset=utf-8';
+        outHeaders['Content-Length'] = String(payload.length);
         res.writeHead(status, outHeaders);
         timing.relayed();
-        return res.end(raw);
+        return res.end(payload);
       }
       res.writeHead(status, outHeaders);
       timing.relayed();

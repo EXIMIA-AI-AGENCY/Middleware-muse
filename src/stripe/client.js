@@ -47,8 +47,10 @@ function backoffMs(retry, random = Math.random) {
  * reads and deletes are idempotent, and every write carries an Idempotency-Key, so Stripe
  * answers a repeat with the first result instead of acting again.
  *
- * Resolves to { res, attempts } with the final response still unread (the caller streams
- * it), or to { error, sent, attempts } when no answer came back at all.
+ * Resolves to { res, attempts, maybeRan } with the final response still unread (the caller
+ * streams it), or to { error, sent, attempts } when no answer came back at all. `maybeRan`
+ * / `sent` say whether an attempt may already have acted at Stripe (sent without an answer,
+ * or answered with an error that was retried), so the final answer alone is not the whole story.
  */
 function createStripeClient(config, { sleep = defaultSleep, now = () => Date.now(), totalMs = 25_000, maxRetries = 2, random = Math.random } = {}) {
   const base = config.baseUrl;
@@ -97,8 +99,9 @@ function createStripeClient(config, { sleep = defaultSleep, now = () => Date.now
       });
       req.on('error', (err) => {
         const code = (err && err.code) || 'ERROR';
-        // A stale keep-alive socket or a refused connection means Stripe got nothing.
-        const sent = written && !(req.reusedSocket && code === 'ECONNRESET') && !NOT_SENT.has(code);
+        // Only a failure to connect proves Stripe got nothing; once the request was written,
+        // even a reset keep-alive socket may have delivered it.
+        const sent = written && !NOT_SENT.has(code);
         done({ error: code, sent });
       });
       if (body && body.length) req.end(body);
@@ -114,18 +117,19 @@ function createStripeClient(config, { sleep = defaultSleep, now = () => Date.now
     const deadline = now() + totalMs;
     const headers = headersFor(incoming, body);
     let attempts = 0;
-    let everSent = false;
+    let maybeRan = false; // an earlier attempt may already have acted at Stripe
     for (let retry = 0; ; retry += 1) {
       attempts += 1;
       const outcome = await attempt({ method, url, headers, body, timeoutMs: deadline - now(), timing });
-      if (outcome.error) everSent = everSent || outcome.sent;
       const canRepeat = outcome.error ? repeatable || !outcome.sent : repeatable && retryableResponse(outcome.res.statusCode, outcome.res.headers);
       const wait = backoffMs(retry + 1, random);
       const timeLeft = deadline - now() - wait;
       if (!canRepeat || retry >= maxRetries || timeLeft < 2000) {
-        if (outcome.error) return { error: outcome.error, sent: everSent, attempts };
-        return { res: outcome.res, attempts };
+        if (outcome.error) return { error: outcome.error, sent: maybeRan || outcome.sent, attempts };
+        return { res: outcome.res, attempts, maybeRan };
       }
+      // Repeating: whatever this attempt did at Stripe stays possible.
+      maybeRan = maybeRan || Boolean(outcome.res) || outcome.sent;
       if (outcome.res) outcome.res.resume(); // discard the body of an attempt we repeat
       await sleep(wait);
     }

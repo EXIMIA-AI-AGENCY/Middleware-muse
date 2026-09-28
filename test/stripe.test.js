@@ -114,6 +114,8 @@ async function setup(t, { env = {}, withStripe = true, denied } = {}) {
 }
 
 const json = (res) => JSON.parse(res.text);
+let keySeq = 0;
+const ikey = () => ({ 'Idempotency-Key': `test-key-${(keySeq += 1)}` });
 const form = (s) => Object.fromEntries(new URLSearchParams(s));
 
 // ---------- config ----------
@@ -143,7 +145,7 @@ test('config: names the wrong kind of key and never echoes it', () => {
   const cases = [
     ['pk_live_abcdefghij0123456789', /PUBLICABLE/],
     ['whsec_abcdefghij0123456789', /webhook/],
-    ['pit-a2a36e01-6cd5-4b6a-89fe-754763111914', /GoHighLevel/],
+    ['pit-00000000-0000-4000-8000-000000000000', /GoHighLevel/],
     ['sk_live_abc def', /espacios/],
     ['hello_world', /no parece una clave de Stripe/],
   ];
@@ -231,13 +233,21 @@ test('keys are separate and nothing reaches Stripe without the Stripe key', asyn
   assert.equal(stripe.requests.length, 0);
 });
 
-test('writes get an Idempotency-Key, returned to Muse; Muse\'s own key is kept', async (t) => {
+test('writes need Muse\'s own Idempotency-Key; it is sent, echoed and replays safely', async (t) => {
   const { url, stripe, accessKey } = await setup(t);
   const body = 'email=ana%40ejemplo.com&metadata[source]=muse';
-  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  const missing = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  assert.equal(missing.status, 400);
+  assert.equal(json(missing).error.code, 'idempotency_key_required');
+  assert.equal(json(missing).proxy.executed, 'no');
+  const delV2 = await request(`${url}/stripe/v2/core/event_destinations/ed_1`, { method: 'DELETE', headers: { 'X-Proxy-Key': accessKey } });
+  assert.equal(delV2.status, 403, 'blocked before the key check');
+  assert.equal(stripe.requests.length, 0);
+
+  const key = 'b1946ac9-2d2f-4b8a-9e3a-111111111111';
+  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', 'Idempotency-Key': key }, body });
   assert.equal(res.status, 200);
-  const key = res.headers['x-proxy-idempotency-key'];
-  assert.match(key, /^muse-[0-9a-f-]{36}$/);
+  assert.equal(res.headers['x-proxy-idempotency-key'], key);
   assert.equal(stripe.requests[0].headers['idempotency-key'], key);
   assert.equal(stripe.requests[0].body, body);
 
@@ -246,8 +256,14 @@ test('writes get an Idempotency-Key, returned to Muse; Muse\'s own key is kept',
   assert.equal(again.headers['idempotent-replayed'], 'true');
   assert.equal(json(again).id, json(res).id);
 
-  // Reads never carry one.
-  await request(`${url}/stripe/v1/customers`, { headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x' } });
+  // Reads and v1 deletes never carry one, and none is echoed; GET bodies are dropped.
+  const read = await request(`${url}/stripe/v1/customers`, { headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x', 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
+  assert.equal(read.headers['x-proxy-idempotency-key'], undefined);
+  assert.equal(stripe.requests.at(-1).headers['idempotency-key'], undefined);
+  assert.equal(stripe.requests.at(-1).body, '');
+  const del = await request(`${url}/stripe/v1/customers/cus_1`, { method: 'DELETE', headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x' } });
+  assert.equal(del.status, 200);
+  assert.equal(del.headers['x-proxy-idempotency-key'], undefined);
   assert.equal(stripe.requests.at(-1).headers['idempotency-key'], undefined);
 });
 
@@ -255,7 +271,7 @@ test('JSON bodies on v1 become form encoding; v2 stays JSON with a version', asy
   const { url, stripe, accessKey } = await setup(t);
   const res = await request(`${url}/stripe/v1/payment_links`, {
     method: 'POST',
-    headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json' },
+    headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() },
     body: JSON.stringify({ line_items: [{ price: 'price_1', quantity: 1 }], metadata: { a: 'b' } }),
   });
   assert.equal(res.status, 200);
@@ -264,13 +280,13 @@ test('JSON bodies on v1 become form encoding; v2 stays JSON with a version', asy
   assert.equal(sent.headers['content-type'], 'application/x-www-form-urlencoded');
   assert.deepEqual(form(sent.body), { 'line_items[0][price]': 'price_1', 'line_items[0][quantity]': '1', 'metadata[a]': 'b' });
 
-  await request(`${url}/stripe/v2/core/accounts`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json' }, body: '{"display_name":"x"}' });
+  await request(`${url}/stripe/v2/core/accounts`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body: '{"display_name":"x"}' });
   const v2 = stripe.requests.at(-1);
   assert.equal(v2.body, '{"display_name":"x"}');
   assert.equal(v2.headers['stripe-version'], DEFAULT_API_VERSION);
   assert.ok(v2.headers['idempotency-key']);
 
-  const bad = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json' }, body: '{nope' });
+  const bad = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body: '{nope' });
   assert.equal(bad.status, 400);
   assert.equal(json(bad).error.code, 'bad_json');
 });
@@ -278,7 +294,7 @@ test('JSON bodies on v1 become form encoding; v2 stays JSON with a version', asy
 test('a dropped connection is retried with the SAME idempotency key', async (t) => {
   const { url, stripe, accessKey } = await setup(t);
   stripe.script('POST /v1/customers', ['drop']);
-  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'name=A' });
+  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', ...ikey() }, body: 'name=A' });
   assert.equal(res.status, 200);
   assert.equal(res.headers['x-proxy-attempts'], '2');
   const posts = stripe.requests.filter((r) => r.method === 'POST');
@@ -300,7 +316,7 @@ test('lock timeouts and 409 are retried; real rate limits and Should-Retry:false
   assert.equal(stripe.requests.filter((r) => r.path === '/v1/prices').length, 1);
 
   stripe.script('POST /v1/refunds', [{ status: 500, headers: { 'Stripe-Should-Retry': 'false' } }]);
-  const failed = await request(`${url}/stripe/v1/refunds`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'charge=ch_1' });
+  const failed = await request(`${url}/stripe/v1/refunds`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', ...ikey() }, body: 'charge=ch_1' });
   assert.equal(failed.status, 500);
   const p = json(failed).proxy;
   assert.equal(p.executed, 'unknown');
@@ -312,7 +328,7 @@ test('lock timeouts and 409 are retried; real rate limits and Should-Retry:false
 test('no answer at all: Muse is told exactly how to find out, with the key to repeat', async (t) => {
   const { url, stripe, accessKey } = await setup(t);
   stripe.script('POST /v1/invoices/in_1/pay', ['drop', 'drop', 'drop']);
-  const res = await request(`${url}/stripe/v1/invoices/in_1/pay`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey } });
+  const res = await request(`${url}/stripe/v1/invoices/in_1/pay`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
   assert.equal(res.status, 502);
   const body = json(res);
   assert.equal(body.error.type, 'proxy_error');
@@ -326,14 +342,14 @@ test('Stripe unreachable before sending: the write certainly did not happen', as
   const deadUrl = await listen(dead);
   await close(dead);
   const { url, accessKey } = await setup(t, { env: { STRIPE_BASE_URL: deadUrl } });
-  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey } });
+  const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
   assert.equal(res.status, 502);
   assert.equal(json(res).proxy.executed, 'no');
 });
 
 test('Stripe errors come back as sent, plus a Spanish explanation', async (t) => {
   const { url, accessKey } = await setup(t, { denied: ['/v1/subscriptions'] });
-  const declined = await request(`${url}/stripe/v1/charges`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'amount=100&currency=usd' });
+  const declined = await request(`${url}/stripe/v1/charges`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', ...ikey() }, body: 'amount=100&currency=usd' });
   assert.equal(declined.status, 402);
   const d = json(declined);
   assert.equal(d.error.decline_code, 'insufficient_funds');
@@ -349,7 +365,7 @@ test('Stripe errors come back as sent, plus a Spanish explanation', async (t) =>
 test('money out and access grants are blocked, whatever the spelling; normal work is not', async (t) => {
   const { url, stripe, accessKey, mod } = await setup(t);
   const call = (method, path, body, type = 'application/x-www-form-urlencoded') =>
-    request(url, { method, path: `/stripe${path}`, headers: { 'X-Proxy-Key': accessKey, 'Content-Type': type }, body });
+    request(url, { method, path: `/stripe${path}`, headers: { 'X-Proxy-Key': accessKey, 'Content-Type': type, ...ikey() }, body });
   const blocked = [
     ['POST', '/v1/payouts', 'amount=100&currency=usd'],
     ['POST', '/v1/PAYOUTS/'],
@@ -374,6 +390,15 @@ test('money out and access grants are blocked, whatever the spelling; normal wor
     ['GET', '/v1/apps/secrets/find?name=x'],
     ['POST', '/v1/account_links'],
     ['POST', '/v1/accounts/acct_1/login_links'],
+    ['POST', '/v1/treasury/financial_accounts/fa_1', 'features[outbound_payments][ach][requested]=true'],
+    ['POST', '/v1/treasury/credit_reversals', 'received_credit=rc_1'],
+    ['POST', '/v1/issuing/cardholders/ich_1', 'status=active'],
+    ['POST', '/v1/issuing/tokens/intok_1', 'status=active'],
+    ['POST', '/v1/accounts/acct_1', 'payout_schedule[interval]=daily'],
+    ['POST', '/v2/core/accounts/acct_1', 'configuration[recipient][default_outbound_destination]=x'],
+    ['GET', '/v1/issuing/cards/ic_1?expand[]=number&expand[]=cvc'],
+    ['GET', '/v1/issuing/cards/ic_1?expand%5B0%5D=cvc'],
+    ['GET', '/v1/issuing/cards?expand[]=data.number'],
   ];
   for (const [method, path, body, type] of blocked) {
     const res = await call(method, path, body, type);
@@ -398,6 +423,8 @@ test('money out and access grants are blocked, whatever the spelling; normal wor
     ['POST', '/v1/checkout/sessions', 'mode=payment'],
     ['DELETE', '/v1/customers/cus_1'],
     ['POST', '/v1/topups', 'amount=100&currency=usd'],
+    ['GET', '/v1/issuing/cards/ic_1?expand[]=cardholder'],
+    ['POST', '/v1/treasury/debit_reversals', 'received_debit=rd_1'],
   ]) {
     const res = await call(method, path, body);
     assert.equal(res.status, 200, `${method} ${path}`);
@@ -408,12 +435,26 @@ test('money out and access grants are blocked, whatever the spelling; normal wor
     assert.equal(res.status, 400, path);
     assert.equal(json(res).error.code, 'invalid_path');
   }
+
+  // Account parameters must be written one unambiguous way.
+  for (const [path, body] of [
+    ['/v1/accounts/acct_1', '[external_account]=btok_1'],
+    ['/v1/accounts/acct_1', ']external_account=btok_1'],
+    ['/v1/accounts/acct_1', 'metadata[a]=1;external_account=btok_1'],
+    ['/v1/accounts/acct_1?a=1;external_account=btok_1', 'metadata[a]=1'],
+    ['/v1/accounts', '{"[external_account]":"btok_1"}'],
+  ]) {
+    const res = await call('POST', path, body, body.startsWith('{') ? 'application/json' : undefined);
+    assert.equal(res.status, 400, `${path} ${body}`);
+    assert.equal(json(res).error.code, 'ambiguous_params');
+  }
+  assert.equal(stripe.requests.filter((r) => r.path.startsWith('/v1/accounts')).length, 2, 'only the two harmless account calls reached Stripe');
 });
 
 test('with the switches on, money out and access grants are forwarded', async (t) => {
   const { url, stripe, accessKey } = await setup(t, { env: { STRIPE_ALLOW_MONEY_OUT: 'true', STRIPE_ALLOW_ACCESS_GRANTS: 'true' } });
   for (const path of ['/v1/payouts', '/v1/webhook_endpoints']) {
-    const res = await request(`${url}/stripe${path}`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
+    const res = await request(`${url}/stripe${path}`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', ...ikey() }, body: 'a=b' });
     assert.equal(res.status, 200, path);
   }
   assert.equal(stripe.requests.length, 2);
@@ -423,7 +464,7 @@ test('only GET, POST and DELETE; bodies over 1 MB are refused', async (t) => {
   const { url, stripe, accessKey } = await setup(t);
   const put = await request(`${url}/stripe/v1/customers/cus_1`, { method: 'PUT', headers: { 'X-Proxy-Key': accessKey } });
   assert.equal(put.status, 405);
-  const big = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded' }, body: `a=${'x'.repeat(1_100_000)}` });
+  const big = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/x-www-form-urlencoded', ...ikey() }, body: `a=${'x'.repeat(1_100_000)}` });
   assert.equal(big.status, 413);
   assert.equal(stripe.requests.length, 0);
 });
@@ -452,6 +493,38 @@ test('own rate limit and own activity; logs never hold keys or queries', async (
   assert.equal(app.locals.metrics.snapshot().calls, 1);
   const text = JSON.stringify(logs);
   for (const secret of [SECRET, accessKey, 'ana@x.com']) assert.ok(!text.includes(secret), 'nothing secret in logs');
+});
+
+test('after a lost first attempt, a later error never claims nothing happened', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  // v1 DELETE has no Idempotency-Key: the lost first attempt may be the one that deleted.
+  stripe.script('DELETE /v1/customers/cus_9', ['drop', { status: 404, body: { error: { type: 'invalid_request_error', code: 'resource_missing', message: 'No such customer' } } }]);
+  const del = await request(`${url}/stripe/v1/customers/cus_9`, { method: 'DELETE', headers: { 'X-Proxy-Key': accessKey } });
+  assert.equal(del.status, 404);
+  assert.equal(json(del).proxy.executed, 'unknown');
+  assert.match(json(del).proxy.next, /ya esté hecho/);
+
+  // A conflict that outlasts the proxy's retries: still running at Stripe.
+  stripe.script('POST /v1/invoices', Array(3).fill({ status: 409, body: { error: { type: 'invalid_request_error', code: 'idempotency_key_in_use', message: 'in use' } } }));
+  const busy = await request(`${url}/stripe/v1/invoices`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
+  assert.equal(busy.status, 409);
+  assert.equal(json(busy).proxy.executed, 'unknown');
+  assert.equal(json(busy).proxy.safe_to_retry, 'same-key');
+
+  // A key reused with other parameters: the original request already ran.
+  stripe.script('POST /v1/subscriptions', [{ status: 400, body: { error: { type: 'idempotency_error', message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.' } } }]);
+  const reused = await request(`${url}/stripe/v1/subscriptions`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
+  assert.equal(json(reused).proxy.executed, 'unknown');
+  assert.equal(json(reused).proxy.safe_to_retry, 'no');
+});
+
+test('error answers that are not JSON still come with the explanation', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  stripe.script('GET /v1/charges', [{ status: 400, body: 'x' }]);
+  const res = await request(`${url}/stripe/v1/charges`, { headers: { 'X-Proxy-Key': accessKey } });
+  assert.equal(res.status, 400);
+  assert.match(res.headers['content-type'], /json/);
+  assert.ok(json(res).proxy.summary);
 });
 
 // ---------- panel ----------
@@ -511,6 +584,16 @@ test('panel: restricted key without some read permissions', async (t) => {
   assert.equal(c.checks.find((x) => x.id === 'scopes').status, 'warn');
   assert.equal(c.checks.find((x) => x.id === 'account').status, 'ok', 'reading the account is optional');
   assert.match(c.permissions.find((p) => p.id === 'invoices').detail, /Invoices/);
+});
+
+test('panel: a passing Stripe hiccup is not reported as a bad key', async (t) => {
+  const { url, stripe } = await setup(t);
+  stripe.script('GET /v1/balance', [{ status: 503, body: { error: { type: 'api_error', message: 'busy' } } }]);
+  const cookie = await login(url);
+  const c = json(await adminPost(url, '/stripe/checks', cookie));
+  const key = c.checks.find((x) => x.id === 'key');
+  assert.equal(key.status, 'warn');
+  assert.match(key.detail, /No es un problema de la clave/);
 });
 
 test('panel: without the key it shows the setup state', async (t) => {
