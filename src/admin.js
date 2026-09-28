@@ -525,7 +525,7 @@ function createAdminRouter({
   });
 
   if (kraken) {
-    kraken.mountAdmin(router, { requireSession, sameOriginJson, publicHost, getSelfUrl, checkMarker, call: createClient() });
+    kraken.mountAdmin(router, { requireSession, sameOriginJson, publicHost, getSelfUrl, call: createClient() });
   }
 
   router.use('/api', (req, res) => sendJson(res, 404, { error: 'not_found' }));

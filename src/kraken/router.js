@@ -48,10 +48,13 @@ function checkParams(method, params) {
   return null;
 }
 
-/** DepositAddresses with new=true creates a new address: not a read. */
+/**
+ * DepositAddresses can create things: `new` generates a new address (Kraken may treat the
+ * flag as set whenever it is present, even as "false") and `amount` makes a Lightning
+ * invoice. Only plain reads of existing addresses are let through.
+ */
 function createsDepositAddress(method, params) {
-  if (method !== 'DepositAddresses' || !('new' in params)) return false;
-  return !(params.new === false || params.new === 'false');
+  return method === 'DepositAddresses' && (Object.hasOwn(params, 'new') || Object.hasOwn(params, 'amount'));
 }
 
 function clientIp(req, trustForwardedFor) {
@@ -66,12 +69,20 @@ function clientIp(req, trustForwardedFor) {
  * POST /api/kraken  {method, params}  -> Kraken's JSON as-is   (X-Proxy-Key: Kraken access key)
  * GET  /api/kraken?health=1           -> {"ok": true}           (no auth)
  *
- * Order: configured? -> 60/min per IP -> key -> body -> method allowlist -> params -> Kraken.
- * Nothing before the last step talks to Kraken.
+ * Order: configured? -> key -> 60/min per IP -> body -> method allowlist -> params -> Kraken.
+ * Nothing before the last step talks to Kraken. Calls with a valid key and calls without one
+ * are counted in separate per-IP buckets, so failed attempts from a shared address can never
+ * use up Muse's budget.
  */
 function createKrakenRouter({ config, client, metrics, limiter, logger }) {
   const router = express.Router();
   const expected = config.enabled ? sha256(config.accessKey) : null;
+  const expectedMarker = config.enabled ? sha256(config.checkMarker) : null;
+  // The panel's own test calls (marker derived from the Kraken secret; the GHL marker is ignored).
+  const isPanelCheck = (req) => {
+    const value = req.headers['x-kraken-check'];
+    return Boolean(expectedMarker) && typeof value === 'string' && value.length > 0 && crypto.timingSafeEqual(sha256(value), expectedMarker);
+  };
   const readBody = express.text({ type: () => true, limit: BODY_LIMIT });
 
   router.get('/', (req, res) => {
@@ -86,7 +97,7 @@ function createKrakenRouter({ config, client, metrics, limiter, logger }) {
 
   router.post('/', (req, res, next) => {
     const started = process.hrtime.bigint();
-    const check = Boolean(res.locals.check);
+    let check = false;
     const done = (status, fields = {}) =>
       metrics.record({ check, status, totalMs: Number(process.hrtime.bigint() - started) / 1e6, ...fields });
 
@@ -95,20 +106,28 @@ function createKrakenRouter({ config, client, metrics, limiter, logger }) {
       return reply(res, 503, 'EProxy:Kraken is not configured on the server');
     }
 
-    // The panel's marked test calls do not use Muse's budget.
+    const provided = req.headers['x-proxy-key'];
+    const keyOk = typeof provided === 'string' && provided.length > 0 && crypto.timingSafeEqual(sha256(provided), expected);
+    // The panel's marked test calls neither use Muse's budget nor show up as Muse's activity.
+    check = keyOk && isPanelCheck(req);
     if (!check) {
-      const { allowed, retryAfterMs } = limiter.hit(clientIp(req, config.trustForwardedFor));
+      const bucket = `${clientIp(req, config.trustForwardedFor)}|${keyOk ? 'key' : 'nokey'}`;
+      const { allowed, retryAfterMs } = limiter.hit(bucket);
       if (!allowed) {
         done(429, { rateLimited: true, error: 'EProxy:Rate limit' });
         return reply(res, 429, 'EProxy:Rate limit exceeded (60 per minute)', { 'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) });
       }
     }
-
-    const provided = req.headers['x-proxy-key'];
-    if (!(typeof provided === 'string' && provided.length > 0 && crypto.timingSafeEqual(sha256(provided), expected))) {
+    if (!keyOk) {
       done(401, { rejectedKey: true, error: 'EProxy:Unauthorized' });
       return reply(res, 401, 'EProxy:Unauthorized');
     }
+
+    // Muse hung up (or its platform timed out): a call still waiting in the queue is dropped.
+    let gone = false;
+    res.once('close', () => {
+      if (!res.writableFinished) gone = true;
+    });
 
     return readBody(req, res, async (err) => {
       try {
@@ -132,19 +151,25 @@ function createKrakenRouter({ config, client, metrics, limiter, logger }) {
         const paramError = checkParams(allowed.method, params);
         if (paramError) return bad(400, paramError);
         if (createsDepositAddress(allowed.method, params)) {
-          return bad(403, 'EProxy:DepositAddresses with new=true creates an address; only reading existing addresses is allowed');
+          return bad(403, 'EProxy:DepositAddresses may only read existing addresses (new and amount are not allowed)');
         }
 
-        const result = await client.privateCall(allowed.method, params, { retryInvalidNonce: allowed.readOnly });
+        const result = await client.privateCall(allowed.method, params, { readOnly: allowed.readOnly, isCancelled: () => gone });
+        if (result.error === 'cancelled') {
+          done(499, { method: allowed.method, error: 'EProxy:Caller hung up before sending' });
+          return undefined;
+        }
         const krakenError = result.json && Array.isArray(result.json.error) && result.json.error.length ? String(result.json.error[0]).slice(0, 120) : null;
         const fields = { method: allowed.method, krakenMs: result.ms, attempts: result.attempts };
         logger.info({ msg: 'kraken_call', method: allowed.method, status: result.status, krakenMs: Math.round(result.ms), attempts: result.attempts, krakenError, check });
 
         if (result.status === 0) {
+          // For trading, a lost answer does not mean the order was not placed.
+          const unknown = allowed.readOnly ? '' : '; the order may or may not have been placed: check OpenOrders/ClosedOrders before retrying';
           const [status, error] =
-            result.error === 'timeout' ? [504, 'EProxy:Kraken did not answer in time']
+            result.error === 'timeout' ? [504, `EProxy:Kraken did not answer in time${unknown}`]
               : result.error === 'busy' ? [503, 'EProxy:Too many Kraken calls waiting; retry in a few seconds']
-                : [502, 'EProxy:Could not reach Kraken'];
+                : [502, `EProxy:Could not reach Kraken${unknown}`];
           done(status, { ...fields, upstreamError: true, error });
           return reply(res, status, error);
         }

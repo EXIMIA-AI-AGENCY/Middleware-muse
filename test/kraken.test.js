@@ -13,7 +13,7 @@ const { createKraken, tryCreateKraken } = require('../src/kraken');
 const { loadKrakenConfig, deriveAccessKey } = require('../src/kraken/config');
 const { checkMethod, READ_ONLY, TRADING, NEVER } = require('../src/kraken/methods');
 const { sign, createNonceSource, selfTest } = require('../src/kraken/sign');
-const { encodeBody } = require('../src/kraken/client');
+const { encodeBody, createKrakenClient } = require('../src/kraken/client');
 
 const API_KEY = 'test-kraken-api-key-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd';
 const SECRET = crypto.randomBytes(64).toString('base64');
@@ -28,7 +28,7 @@ async function startFakeKraken({ handlers = {}, nonceWindow = 0 } = {}) {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8');
-      const record = { method: req.method, url: req.url, headers: req.headers, body };
+      const record = { method: req.method, url: req.url, headers: req.headers, body, destroy: () => req.socket.destroy() };
       requests.push(record);
       const json = (status, payload) => {
         res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -172,6 +172,8 @@ test('allowlist: read-only by default, trading only when enabled, withdrawals ne
     assert.equal(r.status, 403, m);
   }
   for (const m of NEVER) assert.ok(!READ_ONLY.includes(m) && !TRADING.includes(m));
+  // Its token carries the key's permissions (orders over WebSockets), so it counts as trading.
+  assert.equal(checkMethod('GetWebSocketsToken', { trading: false }).ok, false);
 });
 
 // ---------- the endpoint ----------
@@ -274,6 +276,9 @@ test('bad input: 400/403 and Kraken is never called', async (t) => {
     [{ method: 'Balance', params: { asset: null } }, 400],
     [{ method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin', new: true } }, 403],
     [{ method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin', new: 'true' } }, 403],
+    [{ method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin', new: false } }, 403],
+    [{ method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin Lightning', amount: '0.1' } }, 403],
+    [{ method: 'GetWebSocketsToken' }, 403],
     [{ method: 'NotAMethod' }, 403],
   ];
   for (const [body, status] of cases) {
@@ -285,8 +290,9 @@ test('bad input: 400/403 and Kraken is never called', async (t) => {
   assert.equal(empty.status, 400);
   assert.equal(kraken.requests.length, 0);
 
-  const allowed = await call(url, { method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin', new: false } }, h);
+  const allowed = await call(url, { method: 'DepositAddresses', params: { asset: 'XBT', method: 'Bitcoin' } }, h);
   assert.equal(allowed.status, 200);
+  assert.doesNotMatch(kraken.requests[0].body, /new|amount/);
 });
 
 test('60 requests per minute per IP, then 429 with Retry-After', async (t) => {
@@ -299,6 +305,38 @@ test('60 requests per minute per IP, then 429 with Retry-After', async (t) => {
   assert.equal(limited.status, 429);
   assert.ok(Number(limited.headers['retry-after']) >= 1);
   assert.equal(kraken.requests.length, 0);
+});
+
+test('failed attempts from the same IP never use up Muse\'s budget', async (t) => {
+  const { url, accessKey } = await setup(t);
+  for (let i = 0; i < 61; i += 1) await call(url, { method: 'Balance' }, { 'X-Proxy-Key': 'wrong' });
+  const ok = await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey });
+  assert.equal(ok.status, 200);
+  for (let i = 0; i < 59; i += 1) await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey });
+  const limited = await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey });
+  assert.equal(limited.status, 429, 'Muse itself is still limited to 60 per minute');
+});
+
+test('the GHL panel marker does not bypass anything on Kraken; only the Kraken one does', async (t) => {
+  const { url, accessKey, mod } = await setup(t);
+  const ghlMarker = crypto.createHmac('sha256', KEY).update('ghl-proxy admin check v1').digest('hex');
+  for (let i = 0; i < 60; i += 1) await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey, 'X-Admin-Check': ghlMarker });
+  assert.equal((await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey, 'X-Admin-Check': ghlMarker })).status, 429);
+  assert.equal(mod.metrics.snapshot().calls, 60, 'marked calls with the GHL marker still show as Muse activity');
+  // The panel's own marker (from the Kraken secret) skips the limit, but only with the right key.
+  const marker = { 'X-Kraken-Check': mod.config.checkMarker };
+  assert.equal((await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey, ...marker })).status, 200);
+  assert.equal((await call(url, { method: 'Balance' }, { 'X-Proxy-Key': 'wrong', ...marker })).status, 401);
+  assert.notEqual(mod.config.checkMarker, accessKey);
+});
+
+test('a malformed panel marker never causes a 500 (GHL or Kraken)', async (t) => {
+  const { url, accessKey } = await setup(t);
+  const weird = 'é'.repeat(64);
+  const ghl = await request(`${url}/ghl/contacts/`, { headers: { 'X-Proxy-Key': KEY, 'X-Admin-Check': weird } });
+  assert.equal(ghl.status, 200);
+  const k = await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey, 'X-Kraken-Check': weird, 'X-Admin-Check': weird });
+  assert.equal(k.status, 200);
 });
 
 test('one retry on "Invalid nonce" for reads, none for trading', async (t) => {
@@ -332,6 +370,63 @@ test('simultaneous calls reach Kraken in nonce order (no "Invalid nonce")', asyn
   for (const res of results) assert.deepEqual(JSON.parse(res.text).error, []);
   const nonces = kraken.requests.map((r) => BigInt(r.params.nonce));
   for (let i = 1; i < nonces.length; i += 1) assert.ok(nonces[i] > nonces[i - 1]);
+});
+
+test('client: one deadline for the whole call, even if Kraken trickles bytes', async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const timer = setInterval(() => res.write(' '), 50);
+    res.on('close', () => clearInterval(timer));
+  });
+  const base = await listen(server);
+  t.after(() => close(server));
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: base });
+  const client = createKrakenClient(config, { timeoutMs: 300 });
+  const started = Date.now();
+  const res = await client.privateCall('Balance', {}, { readOnly: true });
+  assert.equal(res.error, 'timeout');
+  assert.ok(Date.now() - started < 2000);
+  // The queue is free again.
+  const next = await client.privateCall('Balance', {}, { readOnly: true });
+  assert.equal(next.error, 'timeout');
+});
+
+test('client: a call whose caller hung up is never signed or sent', async (t) => {
+  const kraken = await startFakeKraken();
+  t.after(() => kraken.close());
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url });
+  const client = createKrakenClient(config);
+  const res = await client.privateCall('Balance', {}, { readOnly: true, isCancelled: () => true });
+  assert.equal(res.error, 'cancelled');
+  assert.equal(kraken.requests.length, 0);
+});
+
+test('client: a stale kept-alive socket is retried once for reads', async (t) => {
+  let n = 0;
+  const handlers = {
+    Balance: (record, json) => {
+      n += 1;
+      if (n === 2) return record.destroy(); // the socket dies before any answer
+      return json(200, { error: [], result: {} });
+    },
+  };
+  const kraken = await startFakeKraken({ handlers });
+  t.after(() => kraken.close());
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url });
+  const client = createKrakenClient(config);
+  assert.deepEqual((await client.privateCall('Balance', {}, { readOnly: true })).json.error, []);
+  const second = await client.privateCall('Balance', {}, { readOnly: true });
+  assert.equal(second.status, 200);
+  assert.equal(second.attempts, 2);
+});
+
+test('trading: a lost answer says the order may exist, and is not retried', async (t) => {
+  const handlers = { AddOrder: (record) => record.destroy() };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const res = await call(url, { method: 'AddOrder', params: { pair: 'XBTUSD' } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(res.status, 502);
+  assert.match(errorOf(res), /may or may not have been placed/);
+  assert.equal(kraken.requests.length, 1);
 });
 
 test('Kraken down or not JSON: 502 with an EProxy error', async (t) => {
@@ -431,10 +526,23 @@ test('panel: key with withdraw permission is flagged', async (t) => {
   const cookie = await login(url);
   const c = JSON.parse((await adminPost(url, '/kraken/checks', cookie)).text);
   const perms = Object.fromEntries(c.key.permissions.map((p) => [p.id, p.state]));
+  assert.equal(c.checks.find((x) => x.id === 'keys').status, 'fail');
+  assert.equal(c.overall, 'fail', 'a key that can withdraw is never shown as green');
   assert.equal(perms['withdraw-funds'], 'fail');
   assert.equal(perms['modify-trades'], 'warn');
   assert.equal(perms['query-ledger'], 'warn');
   assert.equal(c.key.notes.find((n) => n.label === 'Nonce window').state, 'warn');
+});
+
+test('panel: with keys Kraken rejects, no second signed call is made', async (t) => {
+  const handlers = { GetApiKeyInfo: (record, json) => json(200, { error: ['EAPI:Invalid key'] }) };
+  const { url, kraken } = await setup(t, { handlers });
+  const cookie = await login(url);
+  const c = JSON.parse((await adminPost(url, '/kraken/checks', cookie)).text);
+  assert.equal(c.checks.find((x) => x.id === 'keys').status, 'fail');
+  assert.equal(c.checks.find((x) => x.id === 'auth').status, 'ok');
+  assert.equal(c.checks.find((x) => x.id === 'withdraw').status, 'ok');
+  assert.equal(kraken.requests.filter((r) => r.url.startsWith('/0/private/')).length, 1);
 });
 
 test('panel: without Kraken settings it shows the setup state', async (t) => {

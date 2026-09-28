@@ -18,7 +18,7 @@ const PERMISSIONS = [
   { id: 'close-trades', label: 'Cancelar y cerrar órdenes', trading: true },
   { id: 'add-funds', label: 'Depositar', extra: 'Solo hace falta para DepositMethods.' },
   { id: 'export-data', label: 'Exportar datos', extra: 'No lo usa Muse.' },
-  { id: 'create-ws-token', label: 'WebSockets', extra: 'Solo hace falta para GetWebSocketsToken.' },
+  { id: 'create-ws-token', label: 'WebSockets', extra: 'Solo hace falta para GetWebSocketsToken (solo con trading activado).' },
 ];
 
 const ADVICE = {
@@ -52,8 +52,8 @@ function museMessage(info, config) {
   const host = info.kraken_host;
   const url = `https://${host}/api/kraken`;
   const trading = config.trading
-    ? `\n### Trading (ACTIVADO en el servidor)\n\n${TRADING.map((m) => `- \`${m}\``).join('\n')}\n\nNunca crees, modifiques ni canceles órdenes sin mi confirmación explícita en el chat, orden por orden.\n`
-    : '\nEl trading está DESACTIVADO: AddOrder, CancelOrder y demás devuelven 403. No lo intentes.\n';
+    ? `\n### Trading (ACTIVADO en el servidor)\n\n${TRADING.map((m) => `- \`${m}\``).join('\n')}\n\nNunca crees, modifiques ni canceles órdenes sin mi confirmación explícita en el chat, orden por orden. Pon siempre un \`cl_ord_id\` o \`userref\` propio en cada orden. Si una orden devuelve 502 o 504, NO la repitas: puede haberse creado igual. Revisa primero \`OpenOrders\` y \`ClosedOrders\`.\n`
+    : '\nEl trading está DESACTIVADO: AddOrder, CancelOrder, GetWebSocketsToken y demás devuelven 403. No lo intentes.\n';
   return `# Conectar Kraken a través del proxy (${config.trading ? 'con trading' : 'solo lectura'})
 
 Hola Muse. Vamos a conectar mi cuenta de Kraken a través de nuestro proxy. El proxy guarda mis claves de Kraken y firma cada llamada; tú solo usas una llave del proxy. Este mensaje no contiene secretos: la llave te la daré por tu tarjeta segura de credenciales, nunca por el chat.
@@ -89,7 +89,7 @@ Nunca disponibles, en ninguna configuración: ${NEVER.map((m) => `\`${m}\``).joi
 - Envía los números como texto: \`"volume": "0.01"\`, \`"start": "1735689600"\`.
 - Kraken usa sus propios códigos de activo: \`XXBT\` (bitcoin), \`XETH\`, \`ZUSD\`, \`ZEUR\`…
 - ClosedOrders, TradesHistory y Ledgers devuelven hasta 50 resultados por llamada; usa \`ofs\` para pedir los siguientes.
-- \`DepositAddresses\` solo lee direcciones existentes (\`new\` no está permitido).
+- \`DepositAddresses\` solo lee direcciones existentes: no envíes \`new\` ni \`amount\` (dan 403).
 - Límites: Kraken cuenta las llamadas por llave (unas 15 seguidas; Ledgers y TradesHistory cuentan más). Haz una llamada a la vez, con ~1 s entre llamadas. El proxy permite 60 por minuto.
 - Precios y datos de mercado son públicos: usa \`https://api.kraken.com/0/public/Ticker?pair=XBTUSD\` directamente, sin el proxy ni la llave.
 
@@ -99,7 +99,7 @@ Nunca disponibles, en ninguna configuración: ${NEVER.map((m) => `\`${m}\``).joi
 - 403 \`EProxy:...\`: método no permitido. No insistas.
 - 400 \`EProxy:...\`: el cuerpo no es válido; lee el mensaje.
 - 429: espera lo que indique \`Retry-After\`.
-- 502/504: Kraken no respondió; reintenta en un minuto.
+- 502/504: Kraken no respondió. En consultas, reintenta en un minuto.
 - 503 \`EProxy:Kraken is not configured\`: faltan las claves en el servidor; avísame.
 - \`EAPI:Invalid nonce\`: el proxy ya reintentó una vez. Espera 2 s y prueba una sola vez más; si se repite, avísame.
 - \`EAPI:Rate limit exceeded\`: espera 60 s.
@@ -150,8 +150,9 @@ function describeKey(info, config, nowMs) {
   return { name: typeof info.apiKeyName === 'string' ? info.apiKeyName.slice(0, 80) : null, permissions, notes };
 }
 
-function createKrakenChecks({ config, client, getSelfUrl, checkMarker, call, now = () => Date.now() }) {
-  const mark = checkMarker ? { 'X-Admin-Check': checkMarker } : {};
+function createKrakenChecks({ config, client, getSelfUrl, call, now = () => Date.now() }) {
+  // Kraken's own marker (from the Kraken secret), not the GHL one.
+  const mark = config.checkMarker ? { 'X-Kraken-Check': config.checkMarker } : {};
 
   async function run() {
     const checks = [];
@@ -174,11 +175,22 @@ function createKrakenChecks({ config, client, getSelfUrl, checkMarker, call, now
     add('reachable', 'Kraken responde', timeOk ? 'ok' : 'fail', timeOk ? 'api.kraken.com contesta desde el servidor.' : `Sin respuesta válida de Kraken (${time.status ? `HTTP ${time.status}` : time.error}).`, time.ms);
 
     if (config.enabled && timeOk) {
-      const info = await client.privateCall('GetApiKeyInfo', {}, { retryInvalidNonce: true });
+      const info = await client.privateCall('GetApiKeyInfo', {}, { readOnly: true });
       const err = firstError(info.json);
+      let keysOk = false;
       if (info.status === 200 && info.json && !err && info.json.result) {
+        keysOk = true;
         key = describeKey(info.json.result, config, now());
-        add('keys', 'Claves válidas', 'ok', `Kraken las acepta${key.name ? ` · llave «${key.name}»` : ''}.`, info.ms);
+        const named = `Kraken las acepta${key.name ? ` · llave «${key.name}»` : ''}`;
+        const states = [...key.permissions, ...key.notes].map((p) => p.state);
+        if (states.includes('fail')) {
+          const risky = key.permissions.filter((p) => p.state === 'fail').map((p) => p.label.toLowerCase());
+          add('keys', 'Claves válidas', 'fail', `${named}, pero la llave tiene permisos peligrosos (${risky.join(', ')}). Quítalos en Kraken → Settings → API.`, info.ms);
+        } else if (states.includes('warn')) {
+          add('keys', 'Claves válidas', 'warn', `${named}. Revisa los avisos en «Permisos de la llave de Kraken».`, info.ms);
+        } else {
+          add('keys', 'Claves válidas', 'ok', `${named}.`, info.ms);
+        }
       } else {
         add('keys', 'Claves válidas', 'fail', info.status ? advice(err || `HTTP ${info.status}`) : `No se pudo llamar a Kraken (${info.error}).`, info.ms);
       }
@@ -197,15 +209,18 @@ function createKrakenChecks({ config, client, getSelfUrl, checkMarker, call, now
         const withdraw = await post({ method: 'Withdraw', params: {} }, withKey);
         add('withdraw', 'Retiros bloqueados', withdraw.status === 403 ? 'ok' : 'fail', withdraw.status === 403 ? 'Withdraw fue rechazado aun con la llave correcta.' : `Withdraw NO fue rechazado (HTTP ${withdraw.status}).`, withdraw.ms);
 
-        const balance = await post({ method: 'Balance' }, withKey);
+        // With keys Kraken already rejected, another signed call would only push toward a lockout.
+        const balance = keysOk ? await post({ method: 'Balance' }, withKey) : null;
         let body = null;
         try {
-          body = JSON.parse(balance.text);
+          body = balance ? JSON.parse(balance.text) : null;
         } catch {
           body = null;
         }
         const berr = firstError(body);
-        if (balance.status === 200 && body && !berr) {
+        if (!balance) {
+          add('proxy', 'Conexión de Muse (Balance)', 'fail', 'Pendiente: primero hay que corregir las claves (ver arriba).');
+        } else if (balance.status === 200 && body && !berr) {
           const assets = body.result && typeof body.result === 'object' ? Object.keys(body.result).length : 0;
           add('proxy', 'Conexión de Muse (Balance)', 'ok', `Muse puede leer el saldo · ${assets} activo${assets === 1 ? '' : 's'} en la cuenta.`, balance.ms);
         } else if (berr === 'EGeneral:Permission denied') {
@@ -241,8 +256,8 @@ function createKrakenChecks({ config, client, getSelfUrl, checkMarker, call, now
  *   POST /api/kraken/checks     live checks
  *   POST /api/kraken/key        reveals the Kraken access key for Muse
  */
-function mountKrakenAdmin(router, { config, client, metrics, logger, version, requireSession, sameOriginJson, publicHost, getSelfUrl, checkMarker, call }) {
-  const runChecks = createKrakenChecks({ config, client, getSelfUrl, checkMarker, call });
+function mountKrakenAdmin(router, { config, client, metrics, logger, version, requireSession, sameOriginJson, publicHost, getSelfUrl, call }) {
+  const runChecks = createKrakenChecks({ config, client, getSelfUrl, call });
   const hostFor = (req) => config.publicHost || publicHost(req);
 
   router.get('/api/kraken/overview', requireSession, (req, res) => {

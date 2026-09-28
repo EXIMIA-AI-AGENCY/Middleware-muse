@@ -42,7 +42,7 @@ function encodeBody(params, nonce) {
  * taken right before sending, so within one instance they always reach Kraken in order.
  * Nothing here logs or returns keys, signatures or request bodies.
  */
-function createKrakenClient(config, { now = () => Date.now() } = {}) {
+function createKrakenClient(config, { now = () => Date.now(), timeoutMs = config.timeoutMs } = {}) {
   const base = config.baseUrl;
   const transport = base.protocol === 'https:' ? https : http;
   const agent = new transport.Agent({ keepAlive: true, maxSockets: 8 });
@@ -54,9 +54,14 @@ function createKrakenClient(config, { now = () => Date.now() } = {}) {
     return new Promise((resolve) => {
       const started = process.hrtime.bigint();
       const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
+      let deadline = null;
+      const finish = (result) => {
+        clearTimeout(deadline);
+        resolve(result);
+      };
       const req = transport.request(
         new URL(path, base),
-        { method, agent, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json', ...headers }, timeout: config.timeoutMs },
+        { method, agent, headers: { 'User-Agent': USER_AGENT, Accept: 'application/json', ...headers } },
         (res) => {
           const chunks = [];
           let size = 0;
@@ -64,26 +69,32 @@ function createKrakenClient(config, { now = () => Date.now() } = {}) {
             size += chunk.length;
             if (size > MAX_RESPONSE_BYTES) {
               res.destroy();
-              resolve({ status: 0, error: 'too_large', ms: elapsed() });
+              finish({ status: 0, error: 'too_large', ms: elapsed() });
               return;
             }
             chunks.push(chunk);
           });
           res.on('end', () => {
             const text = Buffer.concat(chunks).toString('utf8');
-            resolve({ status: res.statusCode, text, json: parseJson(text), ms: elapsed() });
+            finish({ status: res.statusCode, text, json: parseJson(text), ms: elapsed() });
           });
-          res.on('error', () => resolve({ status: 0, error: 'network', ms: elapsed() }));
+          res.on('error', () => finish({ status: 0, error: 'network', ms: elapsed() }));
+          res.on('aborted', () => finish({ status: 0, error: 'network', ms: elapsed() }));
         },
       );
-      req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'KRAKEN_TIMEOUT' })));
-      req.on('error', (err) => resolve({ status: 0, error: err.code === 'KRAKEN_TIMEOUT' ? 'timeout' : 'network', ms: elapsed() }));
+      // One deadline for the whole exchange: a slow trickle of bytes cannot hold the queue.
+      deadline = setTimeout(() => req.destroy(Object.assign(new Error('timeout'), { code: 'KRAKEN_TIMEOUT' })), timeoutMs);
+      req.on('error', (err) => {
+        const timedOut = err.code === 'KRAKEN_TIMEOUT';
+        // `reused` + no response: a kept-alive socket that had gone stale, so Kraken never saw it.
+        finish({ status: 0, error: timedOut ? 'timeout' : 'network', reused: Boolean(req.reusedSocket) && !timedOut, ms: elapsed() });
+      });
       if (body !== undefined) req.write(body);
       req.end();
     });
   }
 
-  async function signedCall(method, params, { retryInvalidNonce }) {
+  async function signedCall(method, params, { readOnly }) {
     const path = `/0/private/${method}`;
     let attempts = 0;
     for (;;) {
@@ -97,26 +108,35 @@ function createKrakenClient(config, { now = () => Date.now() } = {}) {
         'Content-Length': Buffer.byteLength(body),
       };
       const res = await send('POST', path, { headers, body });
-      // Another instance may have used a higher nonce a moment earlier; a fresh one fixes it.
-      // Once only (repeated invalid nonces lead to a lockout) and never for trading calls.
-      const invalidNonce = res.json && Array.isArray(res.json.error) && res.json.error.includes('EAPI:Invalid nonce');
-      if (invalidNonce && retryInvalidNonce && attempts === 1) {
-        await sleep(NONCE_RETRY_DELAY_MS);
-        continue;
+      // Reads only, once: another instance may have used a higher nonce a moment earlier (a
+      // fresh one fixes it; repeated invalid nonces lead to a lockout), or a kept-alive socket
+      // had gone stale before the request left. Trading calls are never repeated.
+      if (readOnly && attempts === 1) {
+        const invalidNonce = res.json && Array.isArray(res.json.error) && res.json.error.includes('EAPI:Invalid nonce');
+        if (invalidNonce) {
+          await sleep(NONCE_RETRY_DELAY_MS);
+          continue;
+        }
+        if (res.status === 0 && res.reused) continue;
       }
       return { ...res, attempts };
     }
   }
 
   return {
-    /** Signed call to /0/private/<method>. `method` must already be allowlisted. */
-    privateCall(method, params = {}, { retryInvalidNonce = false } = {}) {
+    /**
+     * Signed call to /0/private/<method>. `method` must already be allowlisted. `readOnly`
+     * allows one safe retry; `isCancelled()` is checked right before signing, so a call whose
+     * caller has already hung up never reaches Kraken.
+     */
+    privateCall(method, params = {}, { readOnly = false, isCancelled = () => false } = {}) {
       if (queued >= MAX_QUEUE) return Promise.resolve({ status: 0, error: 'busy', ms: 0, attempts: 0 });
       queued += 1;
       const enqueuedAt = process.hrtime.bigint();
       const run = queue.then(async () => {
         const waitMs = Number(process.hrtime.bigint() - enqueuedAt) / 1e6;
-        const res = await signedCall(method, params, { retryInvalidNonce });
+        if (isCancelled()) return { status: 0, error: 'cancelled', ms: 0, attempts: 0, waitMs };
+        const res = await signedCall(method, params, { readOnly });
         return { ...res, waitMs };
       });
       queue = run.then(

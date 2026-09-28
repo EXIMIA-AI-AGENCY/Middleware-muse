@@ -24,6 +24,15 @@ function deriveAccessKey(apiKey, secret) {
   return Buffer.from(crypto.hkdfSync('sha256', secret, Buffer.from(apiKey, 'utf8'), 'muse-proxy kraken access key v1', 32)).toString('hex');
 }
 
+/**
+ * Marker for the panel's own test calls to /api/kraken (they skip the rate limit and are not
+ * Muse's activity). Derived from the Kraken secret, which only the server knows: neither the
+ * GHL key nor the Kraken access key lets anyone compute it.
+ */
+function panelCheckMarker(secret) {
+  return crypto.createHmac('sha256', secret).update('muse-proxy kraken panel check v1').digest('hex');
+}
+
 function readBaseUrl(raw, problems) {
   const value = (raw ?? '').trim() || DEFAULTS.baseUrl;
   let url;
@@ -101,6 +110,7 @@ function loadKrakenConfig(env = process.env, { ghl } = {}) {
     secret: enabled ? secret : null,
     accessKey: enabled ? accessKey : null,
     accessKeySource: enabled ? accessKeySource : null,
+    checkMarker: enabled ? panelCheckMarker(secret) : null,
     // Exactly "true", as specified: "1", "TRUE" or " true" leave trading off.
     trading: env.ENABLE_TRADING === 'true',
     baseUrl,

@@ -648,12 +648,25 @@ curl -s -X POST "$HOST/api/kraken" \
 **Métodos permitidos (solo lectura, siempre):** `Balance`, `TradeBalance`,
 `OpenOrders`, `ClosedOrders`, `QueryOrders`, `TradesHistory`, `QueryTrades`,
 `OpenPositions`, `Ledgers`, `QueryLedgers`, `TradeVolume`, `DepositMethods`,
-`DepositAddresses` (solo direcciones existentes: `new=true` da `403`),
-`DepositStatus`, `WithdrawStatus`, `WithdrawInfo`, `GetWebSocketsToken`.
+`DepositAddresses` (solo direcciones existentes: con `new` o `amount` da
+`403`, porque crean una dirección o una factura Lightning), `DepositStatus`,
+`WithdrawStatus`, `WithdrawInfo`.
 
 **Trading (solo con `ENABLE_TRADING=true`):** `AddOrder`, `AmendOrder`,
 `CancelOrder`, `CancelAll`, `CancelAllOrdersAfter`, `AddOrderBatch`,
-`CancelOrderBatch`.
+`CancelOrderBatch` y `GetWebSocketsToken`.
+
+> **Cambio respecto a la especificación original:** `GetWebSocketsToken`
+> estaba en la lista de solo lectura. No opera por sí mismo, pero el token que
+> devuelve lleva los permisos de la API key: si la llave pudiera operar, Muse
+> podría crear órdenes por WebSockets, saltándose esta lista y
+> `ENABLE_TRADING`. Por eso solo se permite con el trading activado. Muse no
+> lo necesita para leer (todo está en REST).
+>
+> Si activas el trading: un `502`/`504` en una orden **no** significa que no
+> se creó (Kraken pudo recibirla). La respuesta lo dice y el proxy nunca
+> repite una orden; hay que revisar `OpenOrders`/`ClosedOrders` antes de
+> reintentar.
 
 **Nunca, en ninguna configuración:** `Withdraw`, `WithdrawCancel`,
 `WalletTransfer`, `AccountTransfer`, `CreateSubaccount`, `Earn/Allocate`,
@@ -679,11 +692,20 @@ casos:
 | `403` | Método fuera de la lista, trading desactivado, retiros/transferencias, o `DepositAddresses` con `new=true`. |
 | `405` | `GET` sin `?health=1` u otro verbo. |
 | `413` | Cuerpo de más de 64 KB. |
-| `429` | Más de 60 llamadas por minuto desde la misma IP (`Retry-After`). |
-| `502` / `504` | Kraken no respondió, respondió algo que no es JSON o tardó más de 20 s. |
+| `429` | Más de 60 llamadas por minuto desde la misma IP (`Retry-After`). Las llamadas con llave correcta y las que no la traen se cuentan por separado, así los intentos fallidos nunca gastan el cupo de Muse. |
+| `502` / `504` | Kraken no respondió, respondió algo que no es JSON o tardó más de 20 s en total. |
 | `503` | Faltan o están mal las claves de Kraken en el servidor. |
 
 Todas las respuestas llevan `Cache-Control: no-store`.
+
+El límite de 60/min vive en la memoria de cada instancia: en Vercel, con
+varias instancias a la vez, el total puede ser algo mayor (el límite real lo
+pone Kraken, que es más estricto). En Vercel la IP es la del cliente real;
+fuera de Vercel (Docker detrás de otro proxy) todas las llamadas pueden
+compartir la IP del proxy de delante, y el límite pasa a ser global.
+
+Si Muse cuelga (o su plataforma corta) mientras su llamada espera turno, esa
+llamada ya no se firma ni se envía a Kraken.
 
 ### Firma
 
@@ -708,7 +730,8 @@ en desorden. Por eso:
 
 - la API key se crea con **Nonce Window = 10000** (tolera 10 s de desorden);
 - si Kraken responde `EAPI:Invalid nonce` en un método de lectura, el proxy
-  reintenta **una sola vez** con un nonce nuevo (nunca en trading);
+  reintenta **una sola vez** con un nonce nuevo (nunca en trading). Lo mismo
+  si una conexión reutilizada ya estaba cerrada antes de enviar;
 - la llave es **solo para Muse**: si otra app o bot la usa con otro tipo de
   nonce, deja de funcionar aquí (hay que crear otra).
 
@@ -721,8 +744,12 @@ en desorden. Por eso:
 - El panel nunca muestra saldos ni el IBAN que devuelve Kraken; de
   `GetApiKeyInfo` solo usa los permisos, el nonce window, la caducidad y si
   hay lista de IPs.
-- El panel avisa en rojo si la API key tiene permisos de retiro, y en
-  amarillo si puede operar mientras el trading está desactivado.
+- El panel marca en rojo (y el estado general deja de estar en verde) si la
+  API key tiene permisos de retiro, y en amarillo si puede operar mientras el
+  trading está desactivado.
+- Las pruebas del panel contra `/api/kraken` llevan una marca derivada de la
+  Private key (solo el servidor puede calcularla): ni la llave de GHL ni la de
+  Kraken permiten saltarse el límite ni esconder llamadas de la actividad.
 - La llave de GoHighLevel no abre Kraken y la de Kraken no abre GoHighLevel.
 - Si la llave de Muse para Kraken se filtra: crea una API key nueva en
   Kraken, borra la anterior, cambia `KRAKEN_API_KEY` y `KRAKEN_API_SECRET` en

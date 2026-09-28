@@ -33,10 +33,13 @@ function createApp(config, logger, { adminOptions = {}, kraken = null } = {}) {
   // Marker the dashboard puts on its own test calls (never forwarded to GHL). Derived from
   // the proxy key so every instance recognises it; test calls do not use Muse's rate budget.
   const checkMarker = crypto.createHmac('sha256', config.proxyKey).update('ghl-proxy admin check v1').digest('hex');
+  const expectedMarker = Buffer.from(checkMarker);
   const isCheck = (req) => {
     const value = req.headers['x-admin-check'];
-    return typeof value === 'string' && value.length === checkMarker.length &&
-      crypto.timingSafeEqual(Buffer.from(value), Buffer.from(checkMarker));
+    if (typeof value !== 'string') return false;
+    // Compare byte lengths: a non-ASCII header of the same character length must not throw.
+    const given = Buffer.from(value);
+    return given.length === expectedMarker.length && crypto.timingSafeEqual(given, expectedMarker);
   };
 
   app.use((req, res, next) => {

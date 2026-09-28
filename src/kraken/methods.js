@@ -24,11 +24,13 @@ const READ_ONLY = Object.freeze([
   'DepositStatus',
   'WithdrawStatus',
   'WithdrawInfo',
-  'GetWebSocketsToken',
 ]);
 
 // Only when ENABLE_TRADING is exactly "true".
 const TRADING = Object.freeze([
+  // Not a trade itself, but the WebSocket token carries the key's permissions: with a key that
+  // can trade it would allow orders over WebSockets, outside this allowlist and ENABLE_TRADING.
+  'GetWebSocketsToken',
   'AddOrder',
   'AmendOrder',
   'CancelOrder',
