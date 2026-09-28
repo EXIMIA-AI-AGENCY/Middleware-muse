@@ -261,15 +261,18 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
         );
       }
 
-      // 4. The agency API exactly as Muse uses it (public address).
-      const base = config.publicHost ? `https://${config.publicHost}` : getSelfUrl();
-      if (!base) {
-        add('proxy', 'Conexión de Muse', 'warn', 'El servidor aún no está escuchando.');
+      // 4. The agency API as Muse uses it. Keys and panel markers only ever go to this
+      // deployment's own address; a mistyped GHL_AGENCY_PUBLIC_HOST must not receive them.
+      const self = getSelfUrl();
+      if (!self) {
+        const why = 'No se pudo probar: el servidor no conoce su propia dirección (VERCEL_PROJECT_PRODUCTION_URL).';
+        add('proxy', 'Conexión de Muse', 'warn', why);
+        add('separate', 'Llaves separadas', 'warn', why);
       } else {
-        const get = (p, headers = {}) => call(base, p, { headers: { ...mark, ...headers } });
+        const get = (p, headers = {}) => call(self, p, { headers: { ...mark, ...headers } });
         const viaProxy = await get(`/agency/locations/${loc}`, { 'X-Proxy-Key': config.accessKey });
         if (ok2xx(viaProxy)) {
-          add('proxy', 'Conexión de Muse', 'ok', `Responde bien por ${config.publicHost || 'el proxy'}.`, viaProxy.ms);
+          add('proxy', 'Conexión de Muse', 'ok', 'Una llamada con la llave de la agencia responde bien a través del proxy.', viaProxy.ms);
         } else {
           add('proxy', 'Conexión de Muse', 'fail', `La llamada de prueba falló: ${ghlMessage(viaProxy)}`, viaProxy.ms);
         }
@@ -277,13 +280,7 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
         const noKey = await get(`/agency/locations/${loc}`);
         add('auth', 'Sin llave no entra nadie', noKey.status === 401 ? 'ok' : 'fail', noKey.status === 401 ? 'Una llamada sin la llave fue rechazada y no llegó a GoHighLevel.' : `Una llamada sin la llave NO fue rechazada (HTTP ${noKey.status}).`, noKey.ms);
 
-      }
-
-      // The Eximia key and marker only ever go to this deployment's own address, never to
-      // GHL_AGENCY_PUBLIC_HOST (a mistyped host must not receive them).
-      const self = getSelfUrl();
-      if (self) {
-        const eximiaKey = await call(self, `/agency/locations/${loc}`, { headers: { ...mark, 'X-Proxy-Key': ghlConfig.proxyKey } });
+        const eximiaKey = await get(`/agency/locations/${loc}`, { 'X-Proxy-Key': ghlConfig.proxyKey });
         // Marked as the Eximia panel's own test, so it is not counted as a wrong key there.
         const eximiaMark = ghlCheckMarker ? { 'X-Admin-Check': ghlCheckMarker } : {};
         const agencyKeyOnEximia = await call(self, `/ghl/locations/${loc}`, { headers: { ...eximiaMark, 'X-Proxy-Key': config.accessKey } });
@@ -293,6 +290,22 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
           'Llaves separadas',
           separate ? 'ok' : 'fail',
           separate ? 'La llave de Eximia no abre la API de agencia, y la de agencia no abre la de Eximia.' : `Las llaves NO están separadas (HTTP ${eximiaKey.status} / ${agencyKeyOnEximia.status}).`,
+        );
+      }
+
+      // The address given to Muse: only a keyless health call goes there.
+      if (config.publicHost) {
+        const health = await call(`https://${config.publicHost}`, '/health');
+        const body = parseJson(health.text);
+        const same = health.status === 200 && body && body.ok === true && body.version === ghlConfig.version;
+        add(
+          'public',
+          'Dirección para Muse',
+          same ? 'ok' : 'fail',
+          same
+            ? `${config.publicHost} responde (versión ${ghlConfig.version}).`
+            : `${config.publicHost} no responde como este proxy (${health.status ? `HTTP ${health.status}` : health.error}). Revisa que el dominio esté añadido al proyecto en Vercel y que GHL_AGENCY_PUBLIC_HOST esté bien escrito.`,
+          health.ms,
         );
       }
     }

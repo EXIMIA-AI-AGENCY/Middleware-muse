@@ -576,6 +576,7 @@
     fail: 'Kraken tiene un problema',
     setup: 'Falta configurar Kraken',
     missing: 'Kraken no está disponible',
+    error: 'No se pudo verificar',
   };
   const K_SUBS = {
     ok: 'Las claves, la firma y el proxy responden bien. Muse puede usarlo.',
@@ -583,14 +584,15 @@
     fail: 'Revisa el punto en rojo. Muse no podrá usar Kraken hasta corregirlo.',
     setup: 'Sigue los 3 pasos de abajo (unos 5 minutos). GoHighLevel sigue funcionando igual.',
     missing: 'Este servidor todavía no tiene la parte de Kraken.',
+    error: 'La verificación no respondió. Pulsa «Verificar ahora» para intentarlo de nuevo.',
   };
 
   function renderKrakenStatus(state, when) {
     const badge = $('k-status-badge');
-    const iconState = state === 'setup' || state === 'missing' ? 'warn' : state;
+    const iconState = state === 'setup' || state === 'missing' || state === 'error' ? 'warn' : state;
     badge.dataset.state = iconState;
     badge.replaceChildren(icon(ICON[iconState] || ICON.warn));
-    $('tab-kraken').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state;
+    $('tab-kraken').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state === 'error' ? 'warn' : state;
     $('k-status-title').textContent = K_TITLES[state];
     $('k-status-sub').textContent = `${K_SUBS[state]}${when ? ` Verificado ${ago(when)}.` : ''}`;
   }
@@ -643,7 +645,7 @@
       button.disabled = false;
       button.textContent = 'Verificar ahora';
       if (lastKrakenChecks) renderKrakenStatus(lastKrakenChecks.overall, new Date(lastKrakenChecks.ranAt));
-      else if ($('k-status-badge').dataset.state === 'pending') $('k-status-badge').dataset.state = 'warn';
+      else if ($('k-status-badge').dataset.state === 'pending') renderKrakenStatus('error');
       refreshKraken();
     }
   }
@@ -776,6 +778,7 @@
     fail: 'La API de agencia tiene un problema',
     setup: 'Falta configurar la API de agencia',
     missing: 'La API de agencia no está disponible',
+    error: 'No se pudo verificar',
   };
   const A_SUBS = {
     ok: 'El token de la agencia, sus permisos y el proxy responden bien. Muse puede usarla.',
@@ -783,14 +786,15 @@
     fail: 'Revisa el punto en rojo. Muse no podrá usar la API de agencia hasta corregirlo.',
     setup: 'Sigue los 3 pasos de abajo (unos 5 minutos). GHL Eximia y Kraken siguen funcionando igual.',
     missing: 'Este servidor todavía no tiene la parte de agencia.',
+    error: 'La verificación no respondió. Pulsa «Verificar ahora» para intentarlo de nuevo.',
   };
 
   function renderAgencyStatus(state, when) {
     const badge = $('a-status-badge');
-    const iconState = state === 'setup' || state === 'missing' ? 'warn' : state;
+    const iconState = state === 'setup' || state === 'missing' || state === 'error' ? 'warn' : state;
     badge.dataset.state = iconState;
     badge.replaceChildren(icon(ICON[iconState] || ICON.warn));
-    $('tab-agency').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state;
+    $('tab-agency').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state === 'error' ? 'warn' : state;
     $('a-status-title').textContent = A_TITLES[state];
     $('a-status-sub').textContent = `${A_SUBS[state]}${when ? ` Verificado ${ago(when)}.` : ''}`;
   }
@@ -833,7 +837,7 @@
       button.textContent = 'Verificar ahora';
       // A failed repeat keeps showing the last result instead of a badge that pulses forever.
       if (lastAgencyChecks) renderAgencyStatus(lastAgencyChecks.overall, new Date(lastAgencyChecks.ranAt));
-      else if ($('a-status-badge').dataset.state === 'pending') $('a-status-badge').dataset.state = 'warn';
+      else if ($('a-status-badge').dataset.state === 'pending') renderAgencyStatus('error');
       refreshAgency();
     }
   }

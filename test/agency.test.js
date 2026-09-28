@@ -429,13 +429,26 @@ test('panel: the Eximia key and marker never go to GHL_AGENCY_PUBLIC_HOST', asyn
   const run = createAgencyChecks({ config, ghlConfig, getSelfUrl: () => 'http://127.0.0.1:1', call, discovered: {}, ghlCheckMarker: 'eximia-marker' });
   const result = await run();
   const toPublic = sent.filter((r) => r.base.includes('typo-agency.vercel.app'));
-  assert.ok(toPublic.length > 0, 'Muse\'s address is tested');
-  for (const r of toPublic) {
-    assert.notEqual(r.headers['X-Proxy-Key'], KEY, 'the Eximia key stays home');
-    assert.equal(r.headers['X-Admin-Check'], undefined, 'the Eximia marker stays home');
-  }
+  assert.deepEqual(toPublic.map((r) => r.p), ['/health'], 'only a keyless health call goes to Muse\'s address');
+  assert.deepEqual(toPublic[0].headers, {}, 'no key and no panel marker leave this deployment');
   assert.ok(sent.some((r) => r.base === 'http://127.0.0.1:1' && r.headers['X-Proxy-Key'] === KEY), 'isolation is tested on this deployment');
   assert.equal(result.checks.find((c) => c.id === 'separate').status, 'ok');
+  assert.equal(result.checks.find((c) => c.id === 'public').status, 'fail', 'a host that is not this proxy is reported');
+
+  // Without its own address the panel says what it could not test instead of showing green.
+  const blind = await createAgencyChecks({ config, ghlConfig, getSelfUrl: () => null, call, discovered: {}, ghlCheckMarker: 'eximia-marker' })();
+  assert.equal(blind.checks.find((c) => c.id === 'separate').status, 'warn');
+  assert.notEqual(blind.overall, 'ok');
+});
+
+test('panel: the public address is checked with a keyless health call', async (t) => {
+  const { url } = await setup(t, { env: { GHL_AGENCY_PUBLIC_HOST: 'agency.invalid' } });
+  const cookie = await login(url);
+  const c = JSON.parse((await adminPost(url, '/agency/checks', cookie)).text);
+  assert.equal(c.checks.find((x) => x.id === 'public').status, 'fail');
+  assert.equal(c.checks.find((x) => x.id === 'proxy').status, 'ok', 'the proxy itself is tested on this deployment');
+  const o = JSON.parse((await request(`${url}/admin/api/agency/overview`, { headers: { Cookie: cookie } })).text);
+  assert.equal(o.connection.agency_host, 'agency.invalid');
 });
 
 test('panel: GoHighLevel\'s agency id wins over a mistyped GHL_COMPANY_ID', async (t) => {

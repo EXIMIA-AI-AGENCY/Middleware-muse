@@ -898,7 +898,9 @@ El panel (`/admin` → pestaña **GHL Agencia**) muestra estos mismos pasos.
 3. **Redeploy** y, en el panel → **GHL Agencia** → **Verificar ahora**. El
    panel lee el ID de la agencia a través de la subcuenta Eximia
    (`GET /locations/{Eximia}` → `location.companyId`), prueba cada permiso
-   con una lectura y comprueba que las llaves están separadas.
+   con una lectura, comprueba que las llaves están separadas y, si pusiste
+   `GHL_AGENCY_PUBLIC_HOST`, que esa dirección responde (solo con `/health`:
+   la llave y las marcas internas del panel nunca salen hacia esa dirección).
 4. **Conectar Muse:** **Copiar mensaje para Muse** → pégalo en Muse; cuando
    pida la llave de la agencia, **Copiar llave** → su tarjeta segura.
 
