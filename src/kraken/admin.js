@@ -99,7 +99,7 @@ Nunca disponibles, en ninguna configuración: ${NEVER.map((m) => `\`${m}\``).joi
 Cuando algo falla, y en TODAS las llamadas de trading, la respuesta trae, además de \`error\` y \`result\` de Kraken, un objeto \`proxy\`:
 
 - \`proxy.summary\`: qué pasó, en español y con datos concretos. Si algo falló, díselo al usuario con estas palabras.
-- \`proxy.executed\` (órdenes y cancelaciones): \`"yes"\` = se hizo · \`"no"\` = NO se hizo (seguro) · \`"partial"\` = en un lote, algunas sí y otras no (mira \`proxy.orders\`) · \`"unknown"\` = no se sabe.
+- \`proxy.executed\` (órdenes y cancelaciones): \`"yes"\` = se hizo · \`"no"\` = NO se hizo (seguro) · \`"partial"\` = en un lote, algunas sí y otras no (mira \`proxy.orders\`) · \`"unknown"\` = no se sabe (lee \`proxy.summary\`: puede decir, por ejemplo, que el proxy la buscó y todavía no aparece).
 - \`proxy.next\`: qué hacer ahora.
 - \`proxy.retry.safeToRetry\`: \`"yes"\` · \`"no"\` · \`"after-wait"\` (espera \`proxy.retry.afterSeconds\`) · \`"check-first"\` (comprueba antes de repetir).
 - \`proxy.order\` / \`proxy.orders\`: txid, cl_ord_id, estado (\`open\`, \`closed\` = ejecutada, \`canceled\`, \`expired\`), \`vol_exec\` y \`reason\`.
@@ -108,8 +108,11 @@ Cuando algo falla, y en TODAS las llamadas de trading, la respuesta trae, ademá
 
 Reglas:
 - El proxy ya reintenta solo cuando es seguro (nonce, límites de Kraken, conexión que no llegó a salir). No añadas reintentos por tu cuenta salvo que \`safeToRetry\` lo permita.
-- Cada orden lleva un \`cl_ord_id\`: el tuyo, o uno que añade el proxy (lo verás en \`proxy.order.cl_ord_id\`). Si la respuesta de Kraken se pierde, el proxy busca la orden en Kraken y te dice si se creó.
-- NUNCA reenvíes una orden con \`executed\` = \`"yes"\` o \`"unknown"\`. Si es \`"no"\`, puedes reenviarla con el MISMO \`cl_ord_id\`.
+- Pon SIEMPRE tu propio \`cl_ord_id\` en AddOrder y en cada orden de AddOrderBatch (un UUID nuevo por orden, p. ej. \`6d1b345e-2821-40e2-ad83-4ecb18a06876\`). Si no lo pones, el proxy añade uno y te lo devuelve en \`proxy.order.cl_ord_id\`, pero solo lo verás si te llega la respuesta.
+- Si la respuesta de Kraken se pierde, el proxy busca la orden en Kraken por su \`cl_ord_id\` y te dice lo que encontró. Usa \`userref\` solo si es único por orden: Kraken no lo trata como identificador.
+- NUNCA reenvíes una orden con \`executed\` = \`"yes"\`. Con \`"unknown"\`, sigue \`proxy.next\`: búscala (OpenOrders y ClosedOrders con \`cl_ord_id\`) y reenvíala solo si no aparece, con el MISMO \`cl_ord_id\`. Con \`"no"\` puedes reenviarla.
+- Las órdenes pueden tardar hasta ~30 s en responder cuando Kraken va lento (el proxy comprueba qué pasó). Usa un timeout de al menos 45 s en las llamadas de trading.
+- Si no te llega NINGUNA respuesta del proxy (timeout o conexión cortada), NO repitas la orden: busca tu \`cl_ord_id\` en OpenOrders y ClosedOrders, y reenvíala solo si no aparece.
 - Los números pueden ir como número o como texto: el proxy los manda en decimal (\`0.0000001\`, nunca \`1e-7\`).
 - \`validate: true\` solo valida y NO crea la orden. No envíes \`validate: false\` (el proxy lo quita: Kraken lo trataría como «solo validar»).
 
@@ -121,7 +124,7 @@ Reglas:
 - 429: espera lo que indique \`Retry-After\`.
 - 502/504: no hubo respuesta de Kraken; en órdenes, mira \`proxy.executed\` antes de hacer nada.
 - 503: faltan las claves en el servidor, o Kraken bloqueó la llave un rato y el proxy está en pausa (lo dice \`proxy.summary\`).
-- \`EGeneral:Temporary lockout\`: no llames a Kraken en 15 minutos (el proxy ya pausa las llamadas).
+- \`EGeneral:Temporary lockout\`: no llames a Kraken en 15 minutos (cada intento reinicia el bloqueo).
 - \`EAPI:Invalid key\` / \`EAPI:Invalid signature\`: problema de claves en el servidor. Avísame y no reintentes.
 `;
 }
@@ -186,7 +189,15 @@ async function orderTest(post, withKey, add) {
   const txid = body && body.result && Array.isArray(body.result.txid) ? body.result.txid[0] : null;
   if (txid) {
     const cancel = await post({ method: 'CancelOrder', params: { txid } }, withKey);
-    add('orders', label, 'fail', `ATENCIÓN: Kraken creó la orden de prueba (${txid}) aunque era solo de validación. ${cancel.status === 200 ? 'El proxy ya la canceló.' : 'Cancélala en Kraken.'}`, res.ms);
+    let cb = null;
+    try {
+      cb = JSON.parse(cancel.text);
+    } catch {
+      cb = null;
+    }
+    const cancelled = Boolean(cb && cb.proxy && cb.proxy.executed === 'yes');
+    const why = firstError(cb);
+    add('orders', label, 'fail', `ATENCIÓN: Kraken creó la orden de prueba (${txid}) aunque era solo de validación. ${cancelled ? 'El proxy ya la canceló.' : `NO se pudo cancelar${why ? ` («${why}»)` : ''}: cancélala en Kraken ya.`}`, res.ms);
     return;
   }
   const err = firstError(body);

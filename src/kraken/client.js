@@ -90,7 +90,7 @@ function retryWait(policy, method, res, attempt, remainingMs, nowMs) {
   const fits = (ms) => (ms + 1000 < remainingMs ? ms : null);
   const repeatable = policy !== 'create';
   if (res.status === 0) {
-    if (res.error !== 'timeout' && res.error !== 'network') return null; // busy, locked, cancelled, too_large
+    if (res.error !== 'timeout' && res.error !== 'network') return null; // busy, locked, expired, too_large
     if (res.notSent) return attempt <= 2 ? fits(attempt === 1 ? 1000 : 2000) : null;
     // A kept-alive socket that had gone stale: a read can go again right away.
     if (repeatable && res.reused && res.error === 'network' && attempt === 1) return 0;
@@ -204,7 +204,7 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = ATTEMP
     return status;
   }
 
-  async function signedCall(method, params, { policy, budgetMs }) {
+  async function signedCall(method, params, { policy, budgetMs, isCancelled }) {
     const path = `/0/private/${method}`;
     const started = now();
     const attempts = [];
@@ -235,17 +235,23 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = ATTEMP
       if (wait === null) return { ...res, attempts, krakenStatus };
       attempts[attempts.length - 1].retriedAfterMs = wait;
       await sleep(wait);
+      // A retry is a new request: never send one nobody is waiting for.
+      if (isCancelled()) {
+        delete attempts[attempts.length - 1].retriedAfterMs;
+        return { ...res, attempts, krakenStatus, callerGone: true };
+      }
     }
   }
 
   return {
     /**
      * Signed call to /0/private/<method>. `method` must already be allowlisted and `params`
-     * normalized. `policy` picks the retry rules; `isCancelled()` is checked right before
-     * signing, so a call whose caller has already hung up never reaches Kraken.
-     * Returns the last answer plus `attempts` (one entry per try) and `waitMs` in the queue.
+     * normalized. `policy` picks the retry rules. `isCancelled()` is checked before signing
+     * and before every retry, so nothing is sent once the caller has hung up. `deadlineAt`
+     * (ms epoch) caps the whole call including the wait in the queue: past it, the call is not
+     * sent ('expired'). Returns the last answer plus `attempts` (one per try) and `waitMs`.
      */
-    privateCall(method, params = {}, { policy = 'read', isCancelled = () => false, budgetMs } = {}) {
+    privateCall(method, params = {}, { policy = 'read', isCancelled = () => false, budgetMs, deadlineAt } = {}) {
       if (!policies[policy]) throw new Error(`unknown policy ${policy}`);
       if (now() < lockedUntil) return Promise.resolve({ status: 0, error: 'locked', lockedUntil, ms: 0, attempts: [] });
       if (queued >= MAX_QUEUE) return Promise.resolve({ status: 0, error: 'busy', ms: 0, attempts: [] });
@@ -255,7 +261,10 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = ATTEMP
         const waitMs = now() - enqueuedAt;
         if (isCancelled()) return { status: 0, error: 'cancelled', ms: 0, attempts: [], waitMs };
         if (now() < lockedUntil) return { status: 0, error: 'locked', lockedUntil, ms: 0, attempts: [], waitMs };
-        const res = await signedCall(method, params, { policy, budgetMs: budgetMs ?? policies[policy].budgetMs });
+        let budget = budgetMs ?? policies[policy].budgetMs;
+        if (deadlineAt) budget = Math.min(budget, deadlineAt - now());
+        if (budget < 1000) return { status: 0, error: 'expired', notSent: true, ms: 0, attempts: [], waitMs };
+        const res = await signedCall(method, params, { policy, budgetMs: budget, isCancelled });
         return { ...res, waitMs };
       });
       queue = run.then(

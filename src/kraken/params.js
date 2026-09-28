@@ -14,6 +14,8 @@ const LONG_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const SHORT_UUID = /^[0-9a-f]{32}$/i;
 const FREE_TEXT = /^[\x20-\x7e]{1,18}$/;
 const INT32 = { min: -2147483648, max: 2147483647 };
+const TRUE_WORDS = new Set([true, 1, 'true', '1', 'yes']);
+const FALSE_WORDS = new Set([false, 0, 'false', '0', 'no', '']);
 
 /** Plain decimal text for a number or a numeric string ("1e-7" -> "0.0000001", ".5" -> "0.5"). */
 function decimalText(value) {
@@ -29,7 +31,8 @@ function validClOrdId(value) {
 
 function validUserref(value) {
   const n = typeof value === 'string' && /^-?\d+$/.test(value) ? Number(value) : value;
-  return Number.isInteger(n) && n >= INT32.min && n <= INT32.max;
+  // 0 is what Kraken reports for orders WITHOUT a userref, so it cannot identify one.
+  return Number.isInteger(n) && n !== 0 && n >= INT32.min && n <= INT32.max;
 }
 
 /**
@@ -45,7 +48,7 @@ function tagOrder(order, changes, label) {
     return null;
   }
   if (hasRef) {
-    if (!validUserref(order.userref)) return `EProxy:${label}userref must be a whole number between -2147483648 and 2147483647`;
+    if (!validUserref(order.userref)) return `EProxy:${label}userref must be a whole number other than 0, between -2147483648 and 2147483647`;
     return null;
   }
   order.cl_ord_id = crypto.randomUUID();
@@ -53,9 +56,16 @@ function tagOrder(order, changes, label) {
   return null;
 }
 
-/** How to find an order again: its cl_ord_id, or else its userref. */
-function orderRef(order) {
-  return order.cl_ord_id !== undefined ? { cl_ord_id: String(order.cl_ord_id) } : { userref: Number(order.userref) };
+/**
+ * How to find an order again: its cl_ord_id, or else its userref. A userref is not unique at
+ * Kraken, so for those the order's side, type, volume and price are kept to tell it apart.
+ */
+function orderTarget(order) {
+  if (order.cl_ord_id !== undefined) return { ref: { cl_ord_id: String(order.cl_ord_id) } };
+  return {
+    ref: { userref: Number(order.userref) },
+    match: { type: order.type, ordertype: order.ordertype, volume: order.volume, price: order.price },
+  };
 }
 
 /**
@@ -66,17 +76,24 @@ function orderRef(order) {
  *  - numbers go out as plain decimals ("0.0000001", never "1e-7"; ".5" becomes "0.5");
  *  - AddOrder / each AddOrderBatch order gets a cl_ord_id when Muse gave neither cl_ord_id nor
  *    userref, so the proxy can tell whether it was placed if the answer is lost.
- * Returns { params, changes, ids } (ids: one {cl_ord_id} or {userref} per order) or
+ * Returns { params, changes, ids } (ids: one { ref: {cl_ord_id} | {userref}, match? } per order) or
  * { error } (a 400 message).
  */
 function normalizeParams(method, input) {
   const changes = [];
   const params = {};
   for (const [key, value] of Object.entries(input)) {
+    // Kraken treats ANY value of validate as "validate only": only a clear yes is sent.
+    if (key === 'validate') {
+      const v = typeof value === 'string' ? value.trim().toLowerCase() : value;
+      if (TRUE_WORDS.has(v)) params.validate = 'true';
+      else if (FALSE_WORDS.has(v)) changes.push(`validate=${JSON.stringify(value)} no se envió: Kraken trata cualquier valor de validate como «solo validar» y la orden no se habría creado`);
+      else return { error: 'EProxy:validate must be true (only validate, the order is NOT created) or left out' };
+      continue;
+    }
     if (typeof value === 'boolean') {
       if (value) params[key] = 'true';
       else if (DEFAULT_TRUE.has(key)) params[key] = 'false';
-      else if (key === 'validate') changes.push('validate=false no se envió: Kraken trata cualquier valor de validate como «solo validar» y la orden no se habría creado');
       else changes.push(`${key}=false no se envió (ya es el valor por defecto de Kraken)`);
       continue;
     }
@@ -93,7 +110,7 @@ function normalizeParams(method, input) {
   if (method === 'AddOrder') {
     const error = tagOrder(params, changes, '');
     if (error) return { error };
-    ids.push(orderRef(params));
+    ids.push(orderTarget(params));
   }
 
   if (method === 'AddOrderBatch') {
@@ -124,9 +141,12 @@ function normalizeParams(method, input) {
       }
       const error = tagOrder(order, changes, `orders[${i}].`);
       if (error) return { error };
-      ids.push(orderRef(order));
+      ids.push(orderTarget(order));
       out.push(order);
     }
+    // Each order must be findable on its own.
+    const refs = ids.map((t) => JSON.stringify(t.ref));
+    if (new Set(refs).size !== refs.length) return { error: 'EProxy:each order of a batch needs its own cl_ord_id or userref (two orders share one)' };
     params.orders = out;
     // JSON body: top-level booleans must be real booleans there.
     if (params.validate === 'true') params.validate = true;

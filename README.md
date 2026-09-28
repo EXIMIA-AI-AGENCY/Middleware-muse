@@ -693,7 +693,7 @@ responde con `{"error": ["EProxy:..."], "proxy": {...}}` (con la explicación en
 | `405` | `GET` sin `?health=1` u otro verbo. |
 | `413` | Cuerpo de más de 64 KB. |
 | `429` | Más de 60 llamadas por minuto desde la misma IP (`Retry-After`). Las llamadas con llave correcta y las que no la traen se cuentan por separado, así los intentos fallidos nunca gastan el cupo de Muse. |
-| `502` / `504` | Kraken no respondió, respondió algo que no es JSON o tardó más de 20 s en total. |
+| `502` / `504` | Kraken no respondió o respondió algo que no es JSON. En órdenes, `proxy.executed` dice lo que el proxy comprobó. |
 | `503` | Faltan o están mal las claves de Kraken en el servidor. |
 
 Todas las respuestas llevan `Cache-Control: no-store`.
@@ -720,14 +720,30 @@ tenga que hacer nada en estos casos:
 | La conexión no llegó a abrirse (la petición no salió) o Cloudflare 521/523/525/526 | hasta 2 veces | hasta 2 veces |
 | `EService:Unavailable/Busy/Deadline elapsed`, `EGeneral:Internal error`, 5xx, timeout o corte después de enviar | hasta 2 veces (no si Kraken está en mantenimiento) | **nunca**: se comprueba (abajo) |
 
-Todo dentro de un tiempo máximo por llamada (25 s lecturas, 15 s órdenes). Cada orden viaja
-por una conexión nueva, así un fallo al conectar demuestra que no se envió.
+Todo dentro de un tiempo máximo por llamada, contando la espera en la cola del proxy: 25 s
+lecturas y cancelaciones; 30 s órdenes, de los que se reservan 9 s para comprobar qué pasó
+si la respuesta se pierde. Cada orden viaja por una conexión nueva, así un fallo al conectar
+demuestra que no se envió. Si Muse cuelga, el proxy no envía más reintentos.
 
 **Órdenes con resultado dudoso.** Cada orden lleva un `cl_ord_id` (el de Muse, o un UUID que
 añade el proxy). Si la respuesta se pierde o es ambigua, el proxy **no la reenvía**: la busca
-en `OpenOrders` y `ClosedOrders` 2 s y 5 s después y responde si se creó (`executed: "yes"`, con
-txid y estado), si no (`"no"`, se puede reenviar con el mismo `cl_ord_id`) o si no pudo saberlo
-(`"unknown"`, no reenviar).
+en `OpenOrders` y `ClosedOrders` unos 2 s y 5 s después (una orden sola, filtrando por su
+`cl_ord_id`) y responde:
+- encontrada → `executed: "yes"`, con txid y estado;
+- no encontrada → `executed: "unknown"` y el resumen lo dice («no aparece N s después, lo más
+  probable es que no se creara»). No se da como un «no» seguro porque Kraken aún podría procesar
+  una orden que le llegó con retraso; `next` le dice a Muse que espere ~60 s, la busque otra vez
+  y solo entonces la reenvíe con el mismo `cl_ord_id` (que evita la copia mientras la primera
+  siga abierta, no si ya se ejecutó);
+- no se pudo comprobar → `"unknown"`, no reenviar sin buscarla.
+
+Con `userref` (Kraken no lo trata como único) el proxy exige además el mismo lado, tipo,
+volumen y precio, y una sola coincidencia; si hay varias, responde `"unknown"` con las
+candidatas. Se rechazan `userref` 0 y los lotes con identificadores repetidos.
+
+**Cancelaciones repetidas.** Si el primer intento de una cancelación se quedó sin respuesta y
+el reintento ya no encuentra nada que cancelar, el proxy no dice «no se canceló»: consulta la
+orden (CancelOrder) o responde `"unknown"` (CancelAll y lotes).
 
 **El campo `proxy`.** Toda respuesta con error, y toda llamada de trading, lleva junto a
 `error`/`result` de Kraken un objeto `proxy` con: `summary` (qué pasó, en español), `executed`,
@@ -737,16 +753,19 @@ txid y estado), si no (`"no"`, se puede reenviar con el mismo `cl_ord_id`) o si 
 que salen bien se devuelven tal cual, sin `proxy`.
 
 **Ajustes antes de enviar** (siempre listados en `proxy.changes`):
-- `validate: false` no se envía: Kraken trata *cualquier* valor de `validate` como «solo
-  validar», y la orden no se habría creado. Los demás `false` se omiten porque ya son el valor
-  por defecto (salvo `consolidate_taker`, cuyo defecto es `true`).
+- `validate` solo se envía si es claramente sí (`true`, `"true"`, `1`): Kraken trata *cualquier*
+  valor como «solo validar», así que `false`, `"false"`, `0`, `"no"` no se envían (la orden se
+  crea) y un valor dudoso da 400. Los demás `false` se omiten porque ya son el valor por
+  defecto (salvo `consolidate_taker`, cuyo defecto es `true`).
 - Los números salen en decimal (`0.0000001`, nunca `1e-7`; `.5` → `0.5`); en lotes, `volume` y
   `price` van como texto.
 - `cl_ord_id` y `userref` se validan (formato de Kraken; no se pueden usar juntos).
 
 **Otros casos.** Una cancelación que da `EOrder:Unknown order` se explica consultando la orden
-(p. ej. «ya se había ejecutado»). Tras `EGeneral:Temporary lockout`, el proxy deja de llamar a
-Kraken 15 minutos, porque cada intento reinicia el bloqueo. Con los errores de mínimos,
+(p. ej. «ya se había ejecutado», o «sigue abierta: repítela»). Tras `EGeneral:Temporary lockout`,
+el proxy deja de llamar a Kraken 15 minutos, porque cada intento reinicia el bloqueo (por
+instancia: en Vercel otra instancia podría hacer alguna llamada más, por eso a Muse también se
+le dice que espere). Con los errores de mínimos,
 decimales o modo del par, el proxy añade las reglas del par (`AssetPairs`); con
 `EService:*`, el estado de Kraken (`SystemStatus`).
 

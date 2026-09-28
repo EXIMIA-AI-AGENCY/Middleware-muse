@@ -44,7 +44,7 @@ async function startFakeKraken({ handlers = {}, nonceWindow = 0, systemStatus = 
         vol_exec: market ? String(p.volume) : '0.00000000',
         price: market ? '27000.0' : '0.00000',
         reason: null,
-        descr: { pair: p.pair, type: p.type, ordertype: p.ordertype, order: `${p.type} ${p.volume} ${p.pair} @ ${p.ordertype}` },
+        descr: { pair: p.pair, type: p.type, ordertype: p.ordertype, price: p.price ?? '0', order: `${p.type} ${p.volume} ${p.pair} @ ${p.ordertype}` },
       });
       return txid;
     },
@@ -526,19 +526,26 @@ test('order answer lost, but it WAS placed: the proxy finds it and says so (neve
   assert.equal(p.order.cl_ord_id, privateCalls(kraken, 'AddOrder')[0].params.cl_ord_id);
 });
 
-test('order answer lost and NOT placed: verified, safe to resend with the same cl_ord_id', async (t) => {
+test('order answer lost and not found afterwards: said plainly, never as a certain "no"', async (t) => {
   const handlers = { AddOrder: (record) => record.destroy() };
   const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
   const res = await call(url, { method: 'AddOrder', params: ORDER }, { 'X-Proxy-Key': accessKey });
   assert.equal(res.status, 502);
   const p = proxyOf(res);
-  assert.equal(p.executed, 'no');
-  assert.match(p.summary, /NO se creó/);
-  assert.equal(p.retry.safeToRetry, 'yes');
+  assert.equal(p.executed, 'unknown', 'Kraken could still process a late order');
+  assert.match(p.summary, /NO aparece/);
+  assert.equal(p.retry.safeToRetry, 'check-first');
+  assert.equal(p.retry.afterSeconds, 60);
   const id = privateCalls(kraken, 'AddOrder')[0].params.cl_ord_id;
-  assert.ok(p.next.includes(id), 'Muse is told which cl_ord_id to reuse');
+  assert.ok(p.next.includes(id), 'Muse is told which cl_ord_id to look for and reuse');
+  assert.match(p.next, /no protege si la primera ya se ejecutó/);
+  assert.equal(p.order.cl_ord_id, id);
+  assert.equal(p.order.seen, false);
   assert.equal(p.verification.conclusive, true);
   assert.equal(privateCalls(kraken, 'AddOrder').length, 1);
+  // One order: the lookups use its cl_ord_id as filter.
+  assert.equal(privateCalls(kraken, 'OpenOrders')[0].params.cl_ord_id, id);
+  assert.equal(privateCalls(kraken, 'ClosedOrders')[0].params.cl_ord_id, id);
 });
 
 test('order answer lost and the lookup fails too: "unknown", do not resend', async (t) => {
@@ -663,7 +670,7 @@ test('Temporary lockout: calls pause instead of extending it', async (t) => {
   assert.equal(proxyOf(first).retry.afterSeconds, 900);
   const second = await call(url, { method: 'Balance' }, { 'X-Proxy-Key': accessKey });
   assert.equal(second.status, 503);
-  assert.match(proxyOf(second).summary, /pausa las llamadas/);
+  assert.match(proxyOf(second).summary, /no le llama hasta las/);
   assert.equal(privateCalls(kraken, 'Balance').length, 1, 'nothing was sent during the pause');
 });
 
@@ -900,4 +907,154 @@ test('panel: Kraken maintenance and a lockout pause are shown', async (t) => {
   assert.equal(c.checks.find((x) => x.id === 'status').status, 'fail');
   assert.equal(c.checks.find((x) => x.id === 'lockout').status, 'fail');
   assert.equal(c.checks.find((x) => x.id === 'keys'), undefined, 'no signed calls while paused');
+});
+
+// ---------- fixes from the second review ----------
+
+test('userref lookups never match a different order', async (t) => {
+  const handlers = {
+    AddOrder: (record, json, fake) => {
+      if (record.params.price === '1000') return json(200, { error: [], result: { descr: { order: 'A' }, txid: [fake.place(record.params)] } });
+      return record.destroy(); // B: answer lost, never placed
+    },
+  };
+  const { url, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  await call(url, { method: 'AddOrder', params: { ...ORDER, userref: 42 } }, { 'X-Proxy-Key': accessKey });
+  const b = await call(url, { method: 'AddOrder', params: { ...ORDER, price: '1100', userref: 42 } }, { 'X-Proxy-Key': accessKey });
+  const p = proxyOf(b);
+  assert.notEqual(p.executed, 'yes', 'order A must not be taken for order B');
+  assert.match(p.next, /userref Kraken no evita duplicados/);
+});
+
+test('userref 0 and repeated batch ids are refused before sending', async (t) => {
+  const { url, kraken, accessKey } = await setup(t, { env: { ENABLE_TRADING: 'true' } });
+  const zero = await call(url, { method: 'AddOrder', params: { ...ORDER, userref: 0 } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(zero.status, 400);
+  const orders = [{ ordertype: 'limit', type: 'buy', volume: '0.01', price: '1000', userref: 5 }, { ordertype: 'limit', type: 'sell', volume: '0.01', price: '2000', userref: 5 }];
+  const batch = await call(url, { method: 'AddOrderBatch', params: { pair: 'XBTUSD', orders } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(batch.status, 400);
+  assert.equal(kraken.requests.length, 0);
+});
+
+test('validate: text values are handled, unclear ones refused', async (t) => {
+  const { url, kraken, accessKey } = await setup(t, { env: { ENABLE_TRADING: 'true' } });
+  const off = await call(url, { method: 'AddOrder', params: { ...ORDER, validate: 'false' } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(privateCalls(kraken, 'AddOrder')[0].params.validate, undefined);
+  assert.equal(proxyOf(off).executed, 'yes');
+  const odd = await call(url, { method: 'AddOrder', params: { ...ORDER, validate: 'maybe' } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(odd.status, 400);
+  const batchOff = await call(url, { method: 'AddOrderBatch', params: { pair: 'XBTUSD', validate: 'false', orders: [{ ordertype: 'limit', type: 'buy', volume: '0.01', price: '1000' }, { ordertype: 'limit', type: 'buy', volume: '0.01', price: '900' }] } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(JSON.parse(privateCalls(kraken, 'AddOrderBatch')[0].body).validate, undefined);
+  assert.equal(proxyOf(batchOff).executed, 'yes');
+});
+
+test('a validate-only order that gets no answer is "not executed" (nothing to look up)', async (t) => {
+  const handlers = { AddOrder: (record) => record.destroy() };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const res = await call(url, { method: 'AddOrder', params: { ...ORDER, validate: true } }, { 'X-Proxy-Key': accessKey });
+  assert.equal(proxyOf(res).executed, 'no');
+  assert.equal(privateCalls(kraken, 'OpenOrders').length, 0);
+});
+
+test('cancel whose first answer was lost: the retry does not report "not cancelled"', async (t) => {
+  let n = 0;
+  const handlers = {
+    CancelOrder: (record, json, fake) => {
+      n += 1;
+      const hit = [...fake.book].find(([txid]) => txid === record.params.txid);
+      if (n === 1) {
+        hit[1].status = 'canceled';
+        return record.destroy(); // cancelled, answer lost
+      }
+      return json(200, { error: ['EOrder:Unknown order'] });
+    },
+  };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const txid = kraken.fake.place(ORDER);
+  const res = await call(url, { method: 'CancelOrder', params: { txid } }, { 'X-Proxy-Key': accessKey });
+  const p = proxyOf(res);
+  assert.equal(n, 2, 'the cancel was repeated once');
+  assert.equal(p.executed, 'yes');
+  assert.match(p.summary, /intento anterior/);
+});
+
+test('CancelAll whose first answer was lost: "unknown", not "no"', async (t) => {
+  let n = 0;
+  const handlers = {
+    CancelAll: (record, json) => {
+      n += 1;
+      if (n === 1) return record.destroy();
+      return json(200, { error: [], result: { count: 0 } });
+    },
+  };
+  const { url, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const res = await call(url, { method: 'CancelAll' }, { 'X-Proxy-Key': accessKey });
+  const p = proxyOf(res);
+  assert.equal(p.executed, 'unknown');
+  assert.match(p.next, /OpenOrders/);
+});
+
+test('cancel "Unknown order" while the order is still open: repeat it', async (t) => {
+  const handlers = { CancelOrder: (record, json) => json(200, { error: ['EOrder:Unknown order'] }) };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const txid = kraken.fake.place(ORDER);
+  const p = proxyOf(await call(url, { method: 'CancelOrder', params: { txid } }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(p.order.status, 'open');
+  assert.equal(p.retry.safeToRetry, 'after-wait');
+  assert.match(p.next, /repite la misma cancelación/);
+});
+
+test('amend rejected: says the change was not applied, not that the order does not exist', async (t) => {
+  const handlers = { AmendOrder: (record, json) => json(200, { error: ['EOrder:Tick size check failed'] }) };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const txid = kraken.fake.place(ORDER);
+  const p = proxyOf(await call(url, { method: 'AmendOrder', params: { txid, limit_price: '1000.05' } }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(p.executed, 'no');
+  assert.doesNotMatch(p.summary, /NO se creó/);
+  assert.match(p.summary, /El cambio NO se aplicó/);
+});
+
+test('an order retry is never sent after Muse hung up', async (t) => {
+  let n = 0;
+  const handlers = { AddOrder: (record, json) => { n += 1; json(200, { error: ['EAPI:Rate limit exceeded'] }); } };
+  const kraken = await startFakeKraken({ handlers });
+  t.after(() => kraken.close());
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url, ENABLE_TRADING: 'true' });
+  const client = createKrakenClient(config);
+  let gone = false;
+  setTimeout(() => { gone = true; }, 500); // hangs up during the 4 s wait
+  const res = await client.privateCall('AddOrder', { ...ORDER, cl_ord_id: 'x1' }, { policy: 'create', isCancelled: () => gone });
+  assert.equal(n, 1);
+  assert.equal(res.callerGone, true);
+});
+
+test('an ambiguous order answers within the request deadline, even if Kraken never answers', async (t) => {
+  const hang = () => {}; // never answers
+  const handlers = { AddOrder: hang, OpenOrders: hang, ClosedOrders: hang };
+  const kraken = await startFakeKraken({ handlers });
+  t.after(async () => {
+    kraken.requests.forEach((r) => r.destroy());
+    await kraken.close();
+  });
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url, ENABLE_TRADING: 'true' });
+  const client = createKrakenClient(config, { timeoutMs: 400 });
+  const { createExecutor } = require('../src/kraken/execute');
+  const { normalizeParams } = require('../src/kraken/params');
+  const executor = createExecutor({ client, verifyDelaysMs: [100, 100], totalMs: { read: 3000, cancel: 3000, create: 3000 }, lookupReserveMs: 1500 });
+  const prepared = normalizeParams('AddOrder', ORDER);
+  const started = Date.now();
+  const out = await executor.run({ method: 'AddOrder', readOnly: false, params: prepared.params, changes: prepared.changes, ids: prepared.ids });
+  assert.ok(Date.now() - started < 3500, `took ${Date.now() - started} ms`);
+  assert.equal(out.proxy.executed, 'unknown');
+  assert.equal(out.proxy.retry.safeToRetry, 'check-first');
+});
+
+test('malformed order maps from Kraken never lose the answer', async (t) => {
+  const handlers = { QueryOrders: (record, json) => json(200, { error: [], result: { BAD: null } }) };
+  const { url, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const res = await call(url, { method: 'AddOrder', params: ORDER }, { 'X-Proxy-Key': accessKey });
+  assert.equal(res.status, 200);
+  const body = JSON.parse(res.text);
+  assert.equal(body.result.txid.length, 1);
+  assert.equal(body.proxy.executed, 'yes');
 });
