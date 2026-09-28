@@ -4,6 +4,7 @@ const { createRateLimiter } = require('../rate-limit');
 const { mountKrakenAdmin } = require('./admin');
 const { createKrakenClient } = require('./client');
 const { loadKrakenConfig } = require('./config');
+const { createExecutor } = require('./execute');
 const { createKrakenMetrics } = require('./metrics');
 const { createKrakenRouter } = require('./router');
 
@@ -12,12 +13,13 @@ const { createKrakenRouter } = require('./router');
  * its own key, limits, metrics and errors. Missing or wrong Kraken settings only disable
  * /api/kraken; they never affect /ghl or /mcp.
  */
-function createKraken({ env = process.env, ghlConfig, logger, clientOptions } = {}) {
+function createKraken({ env = process.env, ghlConfig, logger, clientOptions, executorOptions } = {}) {
   const config = loadKrakenConfig(env, { ghl: ghlConfig });
   const client = createKrakenClient(config, clientOptions);
   const metrics = createKrakenMetrics();
   const limiter = createRateLimiter({ max: config.rateLimitMax, windowMs: config.rateLimitWindowMs });
-  const router = createKrakenRouter({ config, client, metrics, limiter, logger });
+  const executor = createExecutor({ client, ...executorOptions });
+  const router = createKrakenRouter({ config, client, metrics, limiter, logger, executor });
   return {
     config,
     client,

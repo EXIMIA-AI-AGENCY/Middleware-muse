@@ -1,6 +1,7 @@
 'use strict';
 
 const { sendJson } = require('../http-util');
+const { STATUS_TEXT } = require('./execute');
 const { READ_ONLY, TRADING, NEVER, allowedMethods } = require('./methods');
 const { selfTest } = require('./sign');
 
@@ -52,7 +53,7 @@ function museMessage(info, config) {
   const host = info.kraken_host;
   const url = `https://${host}/api/kraken`;
   const trading = config.trading
-    ? `\n### Trading (ACTIVADO en el servidor)\n\n${TRADING.map((m) => `- \`${m}\``).join('\n')}\n\nNunca crees, modifiques ni canceles órdenes sin mi confirmación explícita en el chat, orden por orden. Pon siempre un \`cl_ord_id\` o \`userref\` propio en cada orden. Si una orden devuelve 502 o 504, NO la repitas: puede haberse creado igual. Revisa primero \`OpenOrders\` y \`ClosedOrders\`.\n`
+    ? `\n### Trading (ACTIVADO en el servidor)\n\n${TRADING.map((m) => `- \`${m}\``).join('\n')}\n\nNunca crees, modifiques ni canceles órdenes sin mi confirmación explícita en el chat, orden por orden. Antes de repetir una orden que falló, mira \`proxy.executed\` (ver abajo).\n`
     : '\nEl trading está DESACTIVADO: AddOrder, CancelOrder, GetWebSocketsToken y demás devuelven 403. No lo intentes.\n';
   return `# Conectar Kraken a través del proxy (${config.trading ? 'con trading' : 'solo lectura'})
 
@@ -84,28 +85,44 @@ Nunca disponibles, en ninguna configuración: ${NEVER.map((m) => `\`${m}\``).joi
 
 ## Reglas del API de Kraken
 
-- La respuesta es el JSON de Kraken tal cual: \`{"error": [], "result": {...}}\`. Revisa SIEMPRE \`error\`: si no está vacío, la llamada falló aunque el HTTP sea 200.
+- La respuesta es el JSON de Kraken, \`{"error": [], "result": {...}}\`, más el objeto \`proxy\` cuando algo falla o en trading (ver abajo). Revisa SIEMPRE \`error\`: si no está vacío, la llamada falló aunque el HTTP sea 200.
 - Los nombres de método son exactos, con mayúsculas (\`Balance\`, no \`balance\`).
-- Envía los números como texto: \`"volume": "0.01"\`, \`"start": "1735689600"\`.
+- Mejor envía los números como texto: \`"volume": "0.01"\`, \`"start": "1735689600"\`.
 - Kraken usa sus propios códigos de activo: \`XXBT\` (bitcoin), \`XETH\`, \`ZUSD\`, \`ZEUR\`…
 - ClosedOrders, TradesHistory y Ledgers devuelven hasta 50 resultados por llamada; usa \`ofs\` para pedir los siguientes.
 - \`DepositAddresses\` solo lee direcciones existentes: no envíes \`new\` ni \`amount\` (dan 403).
 - Límites: Kraken cuenta las llamadas por llave (unas 15 seguidas; Ledgers y TradesHistory cuentan más). Haz una llamada a la vez, con ~1 s entre llamadas. El proxy permite 60 por minuto.
 - Precios y datos de mercado son públicos: usa \`https://api.kraken.com/0/public/Ticker?pair=XBTUSD\` directamente, sin el proxy ni la llave.
 
-## Si algo falla
+## Cómo saber exactamente qué pasó (campo \`proxy\`)
+
+Cuando algo falla, y en TODAS las llamadas de trading, la respuesta trae, además de \`error\` y \`result\` de Kraken, un objeto \`proxy\`:
+
+- \`proxy.summary\`: qué pasó, en español y con datos concretos. Si algo falló, díselo al usuario con estas palabras.
+- \`proxy.executed\` (órdenes y cancelaciones): \`"yes"\` = se hizo · \`"no"\` = NO se hizo (seguro) · \`"partial"\` = en un lote, algunas sí y otras no (mira \`proxy.orders\`) · \`"unknown"\` = no se sabe.
+- \`proxy.next\`: qué hacer ahora.
+- \`proxy.retry.safeToRetry\`: \`"yes"\` · \`"no"\` · \`"after-wait"\` (espera \`proxy.retry.afterSeconds\`) · \`"check-first"\` (comprueba antes de repetir).
+- \`proxy.order\` / \`proxy.orders\`: txid, cl_ord_id, estado (\`open\`, \`closed\` = ejecutada, \`canceled\`, \`expired\`), \`vol_exec\` y \`reason\`.
+- \`proxy.changes\`: lo que el proxy ajustó antes de enviar (p. ej. el cl_ord_id que añadió o un número pasado a decimal).
+- \`proxy.krakenError\` es el texto original de Kraken; \`proxy.where\` dice si falló el proxy, la red o Kraken.
+
+Reglas:
+- El proxy ya reintenta solo cuando es seguro (nonce, límites de Kraken, conexión que no llegó a salir). No añadas reintentos por tu cuenta salvo que \`safeToRetry\` lo permita.
+- Cada orden lleva un \`cl_ord_id\`: el tuyo, o uno que añade el proxy (lo verás en \`proxy.order.cl_ord_id\`). Si la respuesta de Kraken se pierde, el proxy busca la orden en Kraken y te dice si se creó.
+- NUNCA reenvíes una orden con \`executed\` = \`"yes"\` o \`"unknown"\`. Si es \`"no"\`, puedes reenviarla con el MISMO \`cl_ord_id\`.
+- Los números pueden ir como número o como texto: el proxy los manda en decimal (\`0.0000001\`, nunca \`1e-7\`).
+- \`validate: true\` solo valida y NO crea la orden. No envíes \`validate: false\` (el proxy lo quita: Kraken lo trataría como «solo validar»).
+
+## Errores más comunes
 
 - 401 \`EProxy:Unauthorized\`: la llave falta o es incorrecta. Pídemela otra vez por la tarjeta segura.
 - 403 \`EProxy:...\`: método no permitido. No insistas.
-- 400 \`EProxy:...\`: el cuerpo no es válido; lee el mensaje.
+- 400 \`EProxy:...\`: el cuerpo no es válido; \`proxy.detail\` dice qué corregir.
 - 429: espera lo que indique \`Retry-After\`.
-- 502/504: Kraken no respondió. En consultas, reintenta en un minuto.
-- 503 \`EProxy:Kraken is not configured\`: faltan las claves en el servidor; avísame.
-- \`EAPI:Invalid nonce\`: el proxy ya reintentó una vez. Espera 2 s y prueba una sola vez más; si se repite, avísame.
-- \`EAPI:Rate limit exceeded\`: espera 60 s.
-- \`EGeneral:Permission denied\`: a la llave de Kraken le falta ese permiso; avísame.
-- \`EGeneral:Temporary lockout\`: espera 15 minutos antes de volver a llamar.
-- \`EAPI:Invalid key\` o \`EAPI:Invalid signature\`: problema de claves en el servidor. Avísame y no reintentes.
+- 502/504: no hubo respuesta de Kraken; en órdenes, mira \`proxy.executed\` antes de hacer nada.
+- 503: faltan las claves en el servidor, o Kraken bloqueó la llave un rato y el proxy está en pausa (lo dice \`proxy.summary\`).
+- \`EGeneral:Temporary lockout\`: no llames a Kraken en 15 minutos (el proxy ya pausa las llamadas).
+- \`EAPI:Invalid key\` / \`EAPI:Invalid signature\`: problema de claves en el servidor. Avísame y no reintentes.
 `;
 }
 
@@ -150,6 +167,40 @@ function describeKey(info, config, nowMs) {
   return { name: typeof info.apiKeyName === 'string' ? info.apiKeyName.slice(0, 80) : null, permissions, notes };
 }
 
+/**
+ * End-to-end test of the order path, exactly as Muse would send it, with validate=true: Kraken
+ * checks the order but never creates it. The limit price is far below the market, and if Kraken
+ * ever returned a txid anyway the order is cancelled at once.
+ */
+const TEST_ORDER = { pair: 'XBTUSD', type: 'buy', ordertype: 'limit', price: '1000', volume: '0.001', validate: true };
+
+async function orderTest(post, withKey, add) {
+  const label = 'Órdenes (prueba sin ejecutar)';
+  const res = await post({ method: 'AddOrder', params: TEST_ORDER }, withKey);
+  let body = null;
+  try {
+    body = JSON.parse(res.text);
+  } catch {
+    body = null;
+  }
+  const txid = body && body.result && Array.isArray(body.result.txid) ? body.result.txid[0] : null;
+  if (txid) {
+    const cancel = await post({ method: 'CancelOrder', params: { txid } }, withKey);
+    add('orders', label, 'fail', `ATENCIÓN: Kraken creó la orden de prueba (${txid}) aunque era solo de validación. ${cancel.status === 200 ? 'El proxy ya la canceló.' : 'Cancélala en Kraken.'}`, res.ms);
+    return;
+  }
+  const err = firstError(body);
+  if (res.status === 200 && body && !err) {
+    add('orders', label, 'ok', 'Kraken validó una orden de prueba (compra limit de 0.001 BTC a 1000 USD) sin crearla: Muse puede enviar órdenes.', res.ms);
+  } else if (err && /^(EOrder|EAccount|EService:Market)/i.test(err.replace(/\s/g, ''))) {
+    add('orders', label, 'ok', `La ruta de órdenes funciona: Kraken evaluó la orden de prueba y respondió «${err}» (normal en una prueba).`, res.ms);
+  } else if (err === 'EGeneral:Permission denied') {
+    add('orders', label, 'fail', 'La API key de Kraken no tiene permiso para crear órdenes: activa «Create & Modify Orders» (y «Cancel & Close Orders») en Kraken → Settings → API.', res.ms);
+  } else {
+    add('orders', label, 'fail', err ? advice(err) : `La prueba de orden falló (HTTP ${res.status}).`, res.ms);
+  }
+}
+
 function createKrakenChecks({ config, client, getSelfUrl, call, now = () => Date.now() }) {
   // Kraken's own marker (from the Kraken secret), not the GHL one.
   const mark = config.checkMarker ? { 'X-Kraken-Check': config.checkMarker } : {};
@@ -174,8 +225,23 @@ function createKrakenChecks({ config, client, getSelfUrl, call, now = () => Date
     const timeOk = time.status === 200 && time.json && Array.isArray(time.json.error) && time.json.error.length === 0;
     add('reachable', 'Kraken responde', timeOk ? 'ok' : 'fail', timeOk ? 'api.kraken.com contesta desde el servidor.' : `Sin respuesta válida de Kraken (${time.status ? `HTTP ${time.status}` : time.error}).`, time.ms);
 
-    if (config.enabled && timeOk) {
-      const info = await client.privateCall('GetApiKeyInfo', {}, { readOnly: true });
+    if (timeOk) {
+      const status = await client.systemStatus();
+      add(
+        'status',
+        'Estado de Kraken',
+        status === 'online' ? 'ok' : status === 'maintenance' ? 'fail' : 'warn',
+        status ? `Kraken está ${STATUS_TEXT[status] || `en modo ${status}`}.` : 'No se pudo leer el estado de Kraken.',
+      );
+    }
+
+    const pausedUntil = client.lockedUntil();
+    if (config.enabled && pausedUntil) {
+      add('lockout', 'Llamadas en pausa', 'fail', `Kraken bloqueó temporalmente la API key por errores repetidos. Para no alargar el bloqueo, el proxy no le llama hasta las ${new Date(pausedUntil).toISOString().slice(11, 16)} UTC.`);
+    }
+
+    if (config.enabled && timeOk && !pausedUntil) {
+      const info = await client.privateCall('GetApiKeyInfo', {}, { policy: 'read' });
       const err = firstError(info.json);
       let keysOk = false;
       if (info.status === 200 && info.json && !err && info.json.result) {
@@ -228,6 +294,8 @@ function createKrakenChecks({ config, client, getSelfUrl, call, now = () => Date
         } else {
           add('proxy', 'Conexión de Muse (Balance)', 'fail', berr ? advice(berr) : `La llamada de prueba falló (HTTP ${balance.status}).`, balance.ms);
         }
+
+        if (config.trading && keysOk) await orderTest(post, withKey, add);
       }
     }
 

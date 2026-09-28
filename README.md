@@ -664,9 +664,9 @@ curl -s -X POST "$HOST/api/kraken" \
 > lo necesita para leer (todo está en REST).
 >
 > Si activas el trading: un `502`/`504` en una orden **no** significa que no
-> se creó (Kraken pudo recibirla). La respuesta lo dice y el proxy nunca
-> repite una orden; hay que revisar `OpenOrders`/`ClosedOrders` antes de
-> reintentar.
+> se creó (Kraken pudo recibirla). El proxy nunca reenvía una orden con
+> resultado dudoso: la busca en Kraken y dice en `proxy.executed` si se creó
+> (ver [Fiabilidad](#fiabilidad-reintentos-seguros-y-qué-pasó-exactamente)).
 
 **Nunca, en ninguna configuración:** `Withdraw`, `WithdrawCancel`,
 `WalletTransfer`, `AccountTransfer`, `CreateSubaccount`, `Earn/Allocate`,
@@ -682,8 +682,8 @@ directo a `https://api.kraken.com/0/public/...`, sin el proxy.
 ### Errores propios (formato de Kraken)
 
 Para que Muse trate igual los errores del proxy y los de Kraken, el proxy
-responde con `{"error": ["EProxy:..."]}` y nunca llama a Kraken en estos
-casos:
+responde con `{"error": ["EProxy:..."], "proxy": {...}}` (con la explicación en
+`proxy.summary`) y nunca llama a Kraken en estos casos:
 
 | Status | Cuándo |
 |---|---|
@@ -707,6 +707,54 @@ compartir la IP del proxy de delante, y el límite pasa a ser global.
 Si Muse cuelga (o su plataforma corta) mientras su llamada espera turno, esa
 llamada ya no se firma ni se envía a Kraken.
 
+### Fiabilidad: reintentos seguros y «qué pasó exactamente»
+
+**Reintentos automáticos (solo cuando es seguro).** El proxy repite una llamada sin que Muse
+tenga que hacer nada en estos casos:
+
+| Situación | Lecturas y cancelaciones | Órdenes (AddOrder, AddOrderBatch, AmendOrder) |
+|---|---|---|
+| `EAPI:Invalid nonce` (Kraken no ejecutó nada) | hasta 2 veces | hasta 2 veces, con el mismo `cl_ord_id` |
+| `EAPI:Rate limit exceeded`, `EService:Throttled`, `EGeneral:Too many requests` | 1 vez tras 4–13 s | 1 vez tras 4 s |
+| `EOrder:Rate limit exceeded` (por par) | — | hasta 2 veces (2 s y 4 s) |
+| La conexión no llegó a abrirse (la petición no salió) o Cloudflare 521/523/525/526 | hasta 2 veces | hasta 2 veces |
+| `EService:Unavailable/Busy/Deadline elapsed`, `EGeneral:Internal error`, 5xx, timeout o corte después de enviar | hasta 2 veces (no si Kraken está en mantenimiento) | **nunca**: se comprueba (abajo) |
+
+Todo dentro de un tiempo máximo por llamada (25 s lecturas, 15 s órdenes). Cada orden viaja
+por una conexión nueva, así un fallo al conectar demuestra que no se envió.
+
+**Órdenes con resultado dudoso.** Cada orden lleva un `cl_ord_id` (el de Muse, o un UUID que
+añade el proxy). Si la respuesta se pierde o es ambigua, el proxy **no la reenvía**: la busca
+en `OpenOrders` y `ClosedOrders` 2 s y 5 s después y responde si se creó (`executed: "yes"`, con
+txid y estado), si no (`"no"`, se puede reenviar con el mismo `cl_ord_id`) o si no pudo saberlo
+(`"unknown"`, no reenviar).
+
+**El campo `proxy`.** Toda respuesta con error, y toda llamada de trading, lleva junto a
+`error`/`result` de Kraken un objeto `proxy` con: `summary` (qué pasó, en español), `executed`,
+`next` (qué hacer), `retry.safeToRetry` y `afterSeconds`, `order`/`orders` (txid, estado,
+`vol_exec`, `reason`), `changes` (lo que el proxy ajustó), `krakenError` (texto original),
+`attempts`, `pair` (reglas del par cuando explican el rechazo) y `krakenStatus`. Las lecturas
+que salen bien se devuelven tal cual, sin `proxy`.
+
+**Ajustes antes de enviar** (siempre listados en `proxy.changes`):
+- `validate: false` no se envía: Kraken trata *cualquier* valor de `validate` como «solo
+  validar», y la orden no se habría creado. Los demás `false` se omiten porque ya son el valor
+  por defecto (salvo `consolidate_taker`, cuyo defecto es `true`).
+- Los números salen en decimal (`0.0000001`, nunca `1e-7`; `.5` → `0.5`); en lotes, `volume` y
+  `price` van como texto.
+- `cl_ord_id` y `userref` se validan (formato de Kraken; no se pueden usar juntos).
+
+**Otros casos.** Una cancelación que da `EOrder:Unknown order` se explica consultando la orden
+(p. ej. «ya se había ejecutado»). Tras `EGeneral:Temporary lockout`, el proxy deja de llamar a
+Kraken 15 minutos, porque cada intento reinicia el bloqueo. Con los errores de mínimos,
+decimales o modo del par, el proxy añade las reglas del par (`AssetPairs`); con
+`EService:*`, el estado de Kraken (`SystemStatus`).
+
+**Panel.** Con el trading activado, «Verificar ahora» envía por la dirección pública una orden
+de prueba con `validate=true` (Kraken la valida y no la crea; precio muy por debajo del
+mercado y, si Kraken devolviera un txid, se cancela al momento). También muestra el estado de
+Kraken y si el proxy está en pausa por un bloqueo.
+
 ### Firma
 
 `API-Sign = base64(HMAC-SHA512(base64decode(private key), ruta + SHA256(nonce + cuerpo)))`,
@@ -729,9 +777,9 @@ instancias a la vez, y dos llamadas casi simultáneas podrían llegar a Kraken
 en desorden. Por eso:
 
 - la API key se crea con **Nonce Window = 10000** (tolera 10 s de desorden);
-- si Kraken responde `EAPI:Invalid nonce` en un método de lectura, el proxy
-  reintenta **una sola vez** con un nonce nuevo (nunca en trading). Lo mismo
-  si una conexión reutilizada ya estaba cerrada antes de enviar;
+- si Kraken responde `EAPI:Invalid nonce`, el proxy reintenta hasta 2 veces
+  con un nonce nuevo. Es seguro también en órdenes: Kraken rechaza la llamada
+  antes de ejecutar nada (ver [Fiabilidad](#fiabilidad-reintentos-seguros-y-qué-pasó-exactamente));
 - la llave es **solo para Muse**: si otra app o bot la usa con otro tipo de
   nonce, deja de funcionar aquí (hay que crear otra).
 

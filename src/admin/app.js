@@ -682,7 +682,7 @@
               el('td', { class: 'time', text: fmtTime(r.at) }),
               el('td', { class: 'kmethod', text: r.method || '—' }),
               el('td', { class: 'num' }, el('span', { class: `status-pill s${String(r.status)[0]}`, text: String(r.status) })),
-              el('td', { class: `result${r.error ? ' is-error' : ''}`, text: r.error || 'OK' }),
+              el('td', { class: `result${r.error ? ' is-error' : ''}`, title: r.error || undefined, text: r.explain || r.error || 'OK' }),
               el('td', { class: 'num col-total', text: fmtMs(r.krakenMs) }),
             ),
           )

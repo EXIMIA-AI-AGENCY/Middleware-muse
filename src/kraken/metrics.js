@@ -12,7 +12,7 @@ function createKrakenMetrics({ now = () => Date.now() } = {}) {
   const round = (v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : null);
 
   return {
-    record({ check = false, status, method = null, error = null, krakenMs = null, totalMs = null, attempts = null, rejectedKey, rateLimited, upstreamError }) {
+    record({ check = false, status, method = null, error = null, explain = null, executed = null, krakenMs = null, totalMs = null, attempts = null, rejectedKey, rateLimited, upstreamError }) {
       if (check) return; // the panel's own tests are not Muse's activity
       if (rejectedKey) counters.rejectedKey += 1;
       if (rateLimited) counters.rateLimited += 1;
@@ -22,7 +22,17 @@ function createKrakenMetrics({ now = () => Date.now() } = {}) {
       else if (status === 403 || status === 400) counters.rejectedMethod += 1;
       else if (error) counters.krakenErrors += 1;
       else if (status === 200) counters.ok += 1;
-      recent.push({ at: now(), method, status, error, krakenMs: round(krakenMs), totalMs: round(totalMs), attempts });
+      recent.push({
+        at: now(),
+        method,
+        status,
+        error,
+        explain: explain ? String(explain).slice(0, 240) : null,
+        executed: executed || null,
+        krakenMs: round(krakenMs),
+        totalMs: round(totalMs),
+        attempts,
+      });
       if (recent.length > MAX_RECENT) recent.shift();
     },
     snapshot() {

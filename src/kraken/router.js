@@ -2,7 +2,9 @@
 
 const crypto = require('node:crypto');
 const express = require('express');
+const { createExecutor, rejection } = require('./execute');
 const { checkMethod } = require('./methods');
+const { normalizeParams } = require('./params');
 
 const BODY_LIMIT = '64kb';
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -15,9 +17,13 @@ const HINT = 'send a JSON object like {"method":"Balance","params":{}}';
 const sha256 = (value) => crypto.createHash('sha256').update(value, 'utf8').digest();
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Kraken-shaped error, so Muse handles proxy and Kraken errors the same way. */
-function reply(res, status, error, headers = {}) {
-  const payload = JSON.stringify({ error: [error] });
+/**
+ * Kraken-shaped error, so Muse handles proxy and Kraken errors the same way, plus the `proxy`
+ * explanation (nothing was sent to Kraken).
+ */
+function reply(res, status, error, headers = {}, context = {}) {
+  const afterSeconds = headers['Retry-After'] ? Number(headers['Retry-After']) : undefined;
+  const payload = JSON.stringify({ error: [error], proxy: rejection(status, error, { ...context, afterSeconds }) });
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(payload),
@@ -74,7 +80,7 @@ function clientIp(req, trustForwardedFor) {
  * are counted in separate per-IP buckets, so failed attempts from a shared address can never
  * use up Muse's budget.
  */
-function createKrakenRouter({ config, client, metrics, limiter, logger }) {
+function createKrakenRouter({ config, client, metrics, limiter, logger, executor = createExecutor({ client }) }) {
   const router = express.Router();
   const expected = config.enabled ? sha256(config.accessKey) : null;
   const expectedMarker = config.enabled ? sha256(config.checkMarker) : null;
@@ -137,9 +143,10 @@ function createKrakenRouter({ config, client, metrics, limiter, logger }) {
           return reply(res, tooLarge ? 413 : 400, tooLarge ? `EProxy:Body too large (max ${BODY_LIMIT})` : `EProxy:Unreadable body; ${HINT}`);
         }
         const body = typeof req.body === 'string' && req.body.length ? parseBody(req.body) : null;
+        const named = body && typeof body.method === 'string' ? body.method.slice(0, 40) : null;
         const bad = (status, error) => {
-          done(status, { method: body && typeof body.method === 'string' ? body.method.slice(0, 40) : null, error });
-          return reply(res, status, error);
+          done(status, { method: named, error });
+          return reply(res, status, error, {}, { method: named, trading: false });
         };
         if (!isPlainObject(body)) return bad(400, `EProxy:Invalid JSON body; ${HINT}`);
         if (typeof body.method !== 'string' || body.method.length === 0) return bad(400, 'EProxy:method must be a non-empty string');
@@ -147,44 +154,71 @@ function createKrakenRouter({ config, client, metrics, limiter, logger }) {
         if (!isPlainObject(params)) return bad(400, 'EProxy:params must be a JSON object');
 
         const allowed = checkMethod(body.method, { trading: config.trading });
-        if (!allowed.ok) return bad(allowed.status, allowed.error);
+        if (!allowed.ok) {
+          done(allowed.status, { method: named, error: allowed.error });
+          return reply(res, allowed.status, allowed.error, {}, { method: named, trading: /Trading is disabled/.test(allowed.error) });
+        }
         const paramError = checkParams(allowed.method, params);
         if (paramError) return bad(400, paramError);
         if (createsDepositAddress(allowed.method, params)) {
           return bad(403, 'EProxy:DepositAddresses may only read existing addresses (new and amount are not allowed)');
         }
 
-        const result = await client.privateCall(allowed.method, params, { readOnly: allowed.readOnly, isCancelled: () => gone });
-        if (result.error === 'cancelled') {
+        const prepared = normalizeParams(allowed.method, params);
+        if (prepared.error) return bad(400, prepared.error);
+
+        const out = await executor.run({
+          method: allowed.method,
+          readOnly: allowed.readOnly,
+          params: prepared.params,
+          changes: prepared.changes,
+          ids: prepared.ids,
+          isCancelled: () => gone,
+        });
+        const call = out.res;
+        if (out.cancelled) {
           done(499, { method: allowed.method, error: 'EProxy:Caller hung up before sending' });
           return undefined;
         }
-        const krakenError = result.json && Array.isArray(result.json.error) && result.json.error.length ? String(result.json.error[0]).slice(0, 120) : null;
-        const fields = { method: allowed.method, krakenMs: result.ms, attempts: result.attempts };
-        logger.info({ msg: 'kraken_call', method: allowed.method, status: result.status, krakenMs: Math.round(result.ms), attempts: result.attempts, krakenError, check });
+        const errors = call.json && Array.isArray(call.json.error) ? call.json.error.filter((e) => /^E/.test(String(e).trim())) : [];
+        const krakenError = errors.length ? String(errors[0]).slice(0, 120) : null;
+        const executed = out.proxy ? out.proxy.executed : undefined;
+        logger.info({
+          msg: 'kraken_call',
+          method: allowed.method,
+          status: call.status,
+          krakenMs: Math.round(call.ms || 0),
+          attempts: call.attempts ? call.attempts.length : 0,
+          krakenError,
+          executed,
+          check,
+        });
+        done(out.status, {
+          method: allowed.method,
+          krakenMs: call.ms,
+          attempts: call.attempts ? call.attempts.length : 0,
+          error: krakenError || (out.proxy && !out.proxy.ok ? (out.body.error || [])[0] : null),
+          explain: out.proxy ? out.proxy.summary : null,
+          executed,
+          upstreamError: !call.json,
+        });
 
-        if (result.status === 0) {
-          // For trading, a lost answer does not mean the order was not placed.
-          const unknown = allowed.readOnly ? '' : '; the order may or may not have been placed: check OpenOrders/ClosedOrders before retrying';
-          const [status, error] =
-            result.error === 'timeout' ? [504, `EProxy:Kraken did not answer in time${unknown}`]
-              : result.error === 'busy' ? [503, 'EProxy:Too many Kraken calls waiting; retry in a few seconds']
-                : [502, `EProxy:Could not reach Kraken${unknown}`];
-          done(status, { ...fields, upstreamError: true, error });
-          return reply(res, status, error);
+        if (out.text !== undefined) {
+          // Kraken's JSON, byte for byte.
+          res.writeHead(out.status, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Length': Buffer.byteLength(out.text),
+            'Cache-Control': 'no-store',
+          });
+          return res.end(out.text);
         }
-        if (!result.json) {
-          done(502, { ...fields, upstreamError: true, error: `EProxy:Unexpected response (HTTP ${result.status})` });
-          return reply(res, 502, `EProxy:Kraken returned an unexpected response (HTTP ${result.status})`);
-        }
-        done(result.status, { ...fields, error: krakenError });
-        // Kraken's JSON, byte for byte.
-        res.writeHead(result.status, {
+        const payload = JSON.stringify(out.body);
+        res.writeHead(out.status, {
           'Content-Type': 'application/json; charset=utf-8',
-          'Content-Length': Buffer.byteLength(result.text),
+          'Content-Length': Buffer.byteLength(payload),
           'Cache-Control': 'no-store',
         });
-        return res.end(result.text);
+        return res.end(payload);
       } catch (e) {
         return next(e);
       }
