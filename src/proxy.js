@@ -26,6 +26,7 @@ const DROP_REQUEST = new Set([
   'authorization', // replaced by the GHL token
   'user-agent', // replaced by a browser signature
   'x-admin-check', // marks the dashboard's own test calls; internal only
+  'x-agency-check', // same, for the agency API
   'content-length', // re-added below when the client sent a fixed-length body
   'expect', // 100-continue is answered by this server, not relayed
   // Added by the hosting platform's edge, not by Muse. Relaying them to GHL's

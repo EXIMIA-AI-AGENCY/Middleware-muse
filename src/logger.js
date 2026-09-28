@@ -37,9 +37,11 @@ function requestLogger(logger, metrics, isCheck = () => false) {
       };
       if (!res.writableFinished) fields.aborted = true;
       logger.info(fields);
-      if (metrics) {
+      // A route with its own activity (the agency API) sets res.locals.metrics.
+      const target = res.locals.metrics || metrics;
+      if (target) {
         const { timing, upstreamError, rejectedKey, rejectedPin, rateLimited } = res.locals;
-        metrics.record({
+        target.record({
           method: req.method,
           url: req.originalUrl,
           // Client gave up before any answer: not a success, whatever res.statusCode says.
