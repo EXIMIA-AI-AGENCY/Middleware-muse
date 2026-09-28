@@ -10,6 +10,7 @@ const { loadConfig } = require('../src/config');
 const { createAgency, tryCreateAgency } = require('../src/agency');
 const { loadAgencyConfig, deriveAccessKey } = require('../src/agency/config');
 const { canonicalPath } = require('../src/agency/router');
+const { createAgencyChecks } = require('../src/agency/admin');
 
 const AGENCY_TOKEN = 'pit-agency-0123456789abcdef-0123456789abcdef';
 const SUB_TOKEN = 'pit-subaccount-0123456789abcdef-0123456789';
@@ -52,6 +53,9 @@ async function startFakeGhl() {
       const path = req.url.split('?')[0];
       if (req.method === 'GET' && path === `/locations/${LOC}`) return json(200, { location: { id: LOC, name: 'Eximia', companyId: COMPANY } });
       if (path.startsWith('/contacts')) return who === 'agency' ? scope() : json(200, { contacts: [], meta: { total: 3 } });
+      // GHL documents these two for sub-account tokens as well.
+      if (who === 'sub' && path === '/locations/search') return json(200, { locations: [] });
+      if (who === 'sub' && path === '/users/search') return json(200, { users: [] });
       if (who !== 'agency') return scope();
       if (path === `/companies/${COMPANY}`) return json(200, { company: { id: COMPANY, name: 'Eximia Agency', locationCount: 7 } });
       if (path === '/locations/search') return json(200, { locations: [{ id: LOC, name: 'Eximia' }] });
@@ -237,8 +241,19 @@ test('deleting a sub-account is blocked, whatever the spelling of the path', asy
   }
   assert.equal(ghl.requests.length, 0, 'no delete reached GoHighLevel');
   assert.equal(agency.metrics.snapshot().blocked, paths.length);
-  // A malformed encoding is refused, never guessed.
+  // A fragment would make upstream parsers cut the path, so any '#' is refused.
+  for (const path of ['/agency/locations/abc123#/x', '/agency/locations/abc123/#/..', '/agency/locations/abc123#', '/agency/users/?q=a#b']) {
+    const res = await request(url, { method: path.startsWith('/agency/users') ? 'GET' : 'DELETE', path, headers: { 'X-Proxy-Key': accessKey } });
+    assert.equal(res.status, 400, path);
+  }
+  assert.equal(canonicalPath('/locations/abc#/x'), '/locations/abc');
+  // A malformed encoding is refused for a delete, never guessed.
   assert.equal((await request(url, { method: 'DELETE', path: '/agency/locations/%zz', headers: { 'X-Proxy-Key': accessKey } })).status, 400);
+  assert.equal((await request(url, { method: 'DELETE', path: '/agency/locations/abc%25zz', headers: { 'X-Proxy-Key': accessKey } })).status, 400);
+  assert.equal(ghl.requests.length, 0, 'still nothing reached GoHighLevel');
+  // Other methods are passed through as they are, like /ghl.
+  assert.equal((await request(url, { path: '/agency/custom-menus/50%25off', headers: { 'X-Proxy-Key': accessKey } })).status, 200);
+  assert.equal(ghl.requests.at(-1).url, '/custom-menus/50%25off');
   // Deeper routes and other methods on a sub-account are not the sub-account delete.
   assert.equal((await request(`${url}/agency/locations/abc123/customFields/f1`, { method: 'DELETE', headers: { 'X-Proxy-Key': accessKey } })).status, 200);
   assert.equal((await request(`${url}/agency/locations/abc123`, { method: 'PUT', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json' }, body: '{}' })).status, 200);
@@ -398,6 +413,47 @@ test('panel: a sub-account token put in the agency slot is caught', async (t) =>
   assert.equal(c.checks.find((x) => x.id === 'kind').status, 'fail');
   assert.equal(c.overall, 'fail');
   assert.match(c.permissions.find((p) => p.id === 'company').detail, /companies\.readonly/);
+});
+
+test('panel: the Eximia key and marker never go to GHL_AGENCY_PUBLIC_HOST', async () => {
+  const ghlConfig = loadConfig({ GHL_TOKEN: TOKEN, PROXY_KEY: KEY, ADMIN_PIN: PIN });
+  const config = loadAgencyConfig({ GHL_AGENCY_TOKEN: AGENCY_TOKEN, GHL_AGENCY_PUBLIC_HOST: 'typo-agency.vercel.app' }, { ghl: ghlConfig });
+  const sent = [];
+  const call = async (base, p, { headers = {} } = {}) => {
+    sent.push({ base: String(base), p, headers });
+    if (String(base).startsWith(ghlConfig.upstreamBase.origin)) {
+      return { status: 200, text: JSON.stringify({ location: { companyId: COMPANY }, company: { name: 'A' } }), ms: 1 };
+    }
+    return { status: headers['X-Proxy-Key'] === config.accessKey && p.startsWith('/agency') ? 200 : 401, text: '{}', ms: 1 };
+  };
+  const run = createAgencyChecks({ config, ghlConfig, getSelfUrl: () => 'http://127.0.0.1:1', call, discovered: {}, ghlCheckMarker: 'eximia-marker' });
+  const result = await run();
+  const toPublic = sent.filter((r) => r.base.includes('typo-agency.vercel.app'));
+  assert.ok(toPublic.length > 0, 'Muse\'s address is tested');
+  for (const r of toPublic) {
+    assert.notEqual(r.headers['X-Proxy-Key'], KEY, 'the Eximia key stays home');
+    assert.equal(r.headers['X-Admin-Check'], undefined, 'the Eximia marker stays home');
+  }
+  assert.ok(sent.some((r) => r.base === 'http://127.0.0.1:1' && r.headers['X-Proxy-Key'] === KEY), 'isolation is tested on this deployment');
+  assert.equal(result.checks.find((c) => c.id === 'separate').status, 'ok');
+});
+
+test('panel: GoHighLevel\'s agency id wins over a mistyped GHL_COMPANY_ID', async (t) => {
+  const { url } = await setup(t, { env: { GHL_COMPANY_ID: 'WrongCompany123' } });
+  const cookie = await login(url);
+  const c = JSON.parse((await adminPost(url, '/agency/checks', cookie)).text);
+  assert.equal(c.checks.find((x) => x.id === 'company_id').status, 'warn');
+  assert.equal(c.checks.find((x) => x.id === 'scopes').status, 'ok', 'the probes use the real id');
+  const o = JSON.parse((await request(`${url}/admin/api/agency/overview`, { headers: { Cookie: cookie } })).text);
+  assert.equal(o.connection.company_id, COMPANY);
+});
+
+test('panel: any instance fills the agency id in the Muse message, even before a check', async (t) => {
+  const { url } = await setup(t);
+  const cookie = await login(url);
+  const o = JSON.parse((await request(`${url}/admin/api/agency/overview`, { headers: { Cookie: cookie } })).text);
+  assert.equal(o.connection.company_id, COMPANY);
+  assert.match(o.museMessage, new RegExp(`companyId=${COMPANY}`));
 });
 
 test('panel: a token GHL rejects fails the token check', async (t) => {

@@ -642,7 +642,8 @@
     } finally {
       button.disabled = false;
       button.textContent = 'Verificar ahora';
-      if (!lastKrakenChecks && $('k-status-badge').dataset.state === 'pending') $('k-status-badge').dataset.state = 'warn';
+      if (lastKrakenChecks) renderKrakenStatus(lastKrakenChecks.overall, new Date(lastKrakenChecks.ranAt));
+      else if ($('k-status-badge').dataset.state === 'pending') $('k-status-badge').dataset.state = 'warn';
       refreshKraken();
     }
   }
@@ -830,7 +831,9 @@
     } finally {
       button.disabled = false;
       button.textContent = 'Verificar ahora';
-      if (!lastAgencyChecks && $('a-status-badge').dataset.state === 'pending') $('a-status-badge').dataset.state = 'warn';
+      // A failed repeat keeps showing the last result instead of a badge that pulses forever.
+      if (lastAgencyChecks) renderAgencyStatus(lastAgencyChecks.overall, new Date(lastAgencyChecks.ranAt));
+      else if ($('a-status-badge').dataset.state === 'pending') $('a-status-badge').dataset.state = 'warn';
       refreshAgency();
     }
   }

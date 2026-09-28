@@ -18,7 +18,8 @@ const METHOD_OVERRIDE = ['x-http-method-override', 'x-http-method', 'x-method-ov
  * against this so an encoded or dotted path cannot slip past them.
  */
 function canonicalPath(url) {
-  let path = String(url).split('?', 1)[0];
+  // Cut at a fragment too: URL parsers upstream would drop everything after '#'.
+  let path = String(url).split(/[?#]/, 1)[0];
   for (let i = 0; ; i += 1) {
     let decoded;
     try {
@@ -85,10 +86,14 @@ function createAgencyRouter({ config, ghlConfig, logger, metrics, limiter }) {
   });
 
   router.use((req, res, next) => {
+    // A fragment is never valid in a request (RFC 9112 §3.2); upstream parsers would cut the
+    // path there, so it could hide a route from the guard below.
+    if (req.url.includes('#')) return sendJson(res, 400, { error: 'bad_request', message: 'The path cannot contain "#".' });
     const path = canonicalPath(req.url);
-    if (path === null) return sendJson(res, 400, { error: 'bad_request', message: 'The path has invalid percent-encoding.' });
+    // Only the delete guard needs the decoded path; other methods pass through untouched.
+    if (path === null && req.method === 'DELETE') return sendJson(res, 400, { error: 'bad_request', message: 'The path has invalid percent-encoding.' });
     for (const name of METHOD_OVERRIDE) delete req.headers[name];
-    if (isSubAccountDelete(req.method, path) && !config.allowDelete) {
+    if (path !== null && isSubAccountDelete(req.method, path) && !config.allowDelete) {
       res.locals.blocked = true;
       logger.warn({ msg: 'agency_delete_blocked' });
       return sendJson(res, 403, {
@@ -96,7 +101,8 @@ function createAgencyRouter({ config, ghlConfig, logger, metrics, limiter }) {
         message: 'Deleting a sub-account cannot be undone, so the proxy does not allow it. Nothing was sent to GoHighLevel. Tell the user: they can delete it in GoHighLevel themselves, or the owner can allow it on the proxy with GHL_AGENCY_ALLOW_DELETE=true.',
       });
     }
-    if (!req.headers.version && /^\/saas(-api)?\//.test(path)) req.headers.version = SAAS_VERSION;
+    const saasPath = path ?? req.url.split('?', 1)[0].toLowerCase();
+    if (!req.headers.version && /^\/saas(-api)?\//.test(saasPath)) req.headers.version = SAAS_VERSION;
     return forward(req, res, next);
   });
   return router;

@@ -4,12 +4,14 @@ const { sendJson } = require('../http-util');
 
 // Read-only probes, one per agency permission Muse is likely to use. Diagnostics only: the
 // agency API itself passes every route through.
+// agencyOnly: GHL answers these only to agency tokens (sub-account tokens can also search
+// locations and users), so they tell an agency token from a sub-account one.
 const PROBES = [
   { id: 'locations', label: 'Subcuentas', scope: 'locations.readonly', path: (c) => `/locations/search?companyId=${c}&limit=1` },
   { id: 'users', label: 'Usuarios', scope: 'users.readonly', path: (c) => `/users/search?companyId=${c}&limit=1` },
-  { id: 'snapshots', label: 'Snapshots', scope: 'snapshots.readonly', path: (c) => `/snapshots/?companyId=${c}` },
-  { id: 'saas', label: 'SaaS (planes)', scope: 'saas/company.read', version: '2021-04-15', path: (c) => `/saas/agency-plans/${c}` },
-  { id: 'menus', label: 'Menús personalizados', scope: 'custom-menu-link.readonly', path: () => '/custom-menus/?limit=1' },
+  { id: 'snapshots', label: 'Snapshots', scope: 'snapshots.readonly', agencyOnly: true, path: (c) => `/snapshots/?companyId=${c}` },
+  { id: 'saas', label: 'SaaS (planes)', scope: 'saas/company.read', agencyOnly: true, version: '2021-04-15', path: (c) => `/saas/agency-plans/${c}` },
+  { id: 'menus', label: 'Menús personalizados', scope: 'custom-menu-link.readonly', agencyOnly: true, path: () => '/custom-menus/?limit=1' },
 ];
 
 // Every scope GHL offers an agency Private Integration (as of 2026). Ticking all of them lets
@@ -79,7 +81,7 @@ function connectionInfo(config, ghlConfig, host, companyId) {
     auth_placement: 'header:X-Proxy-Key',
     rest_base_path: '/agency',
     health_url: `https://${h}/health`,
-    company_id: companyId || 'PENDIENTE (lo lee el panel al verificar)',
+    company_id: companyId || 'PENDIENTE (Muse lo lee en el paso 3b)',
     eximia_location_id: ghlConfig.ghlLocationId,
     delete_sub_accounts: config.allowDelete ? 'allowed' : 'blocked',
     version: ghlConfig.version,
@@ -153,13 +155,25 @@ ${deleteRule}
 `;
 }
 
+/** A read straight to GoHighLevel with the agency token (diagnostics only). */
+function directCall(call, config, ghlConfig) {
+  return (p, version = ghlConfig.ghlVersion, timeoutMs = undefined) =>
+    call(ghlConfig.upstreamBase, p, {
+      headers: { Authorization: `Bearer ${config.token}`, Version: version, Accept: 'application/json', 'User-Agent': ghlConfig.userAgent },
+      timeoutMs,
+    });
+}
+
+/** location.companyId from GET /locations/{id}, which agency tokens are documented to read. */
+function companyIdOf(res) {
+  const body = parseJson(res.text);
+  return ok2xx(res) && body && body.location && typeof body.location.companyId === 'string' ? body.location.companyId : null;
+}
+
 function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, ghlCheckMarker }) {
   const loc = encodeURIComponent(ghlConfig.ghlLocationId);
   const mark = config.checkMarker ? { 'X-Agency-Check': config.checkMarker } : {};
-  const direct = (p, version = ghlConfig.ghlVersion) =>
-    call(ghlConfig.upstreamBase, p, {
-      headers: { Authorization: `Bearer ${config.token}`, Version: version, Accept: 'application/json', 'User-Agent': ghlConfig.userAgent },
-    });
+  const direct = directCall(call, config, ghlConfig);
 
   async function run() {
     const checks = [];
@@ -178,14 +192,17 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
     if (config.enabled) {
       // 1. The token, and the agency id through the Eximia sub-account (documented for agency tokens).
       const location = await direct(`/locations/${loc}`);
-      const locBody = parseJson(location.text);
-      const foundId = locBody && locBody.location && typeof locBody.location.companyId === 'string' ? locBody.location.companyId : null;
-      const companyId = config.companyId || foundId;
-      if (companyId) discovered.companyId = companyId;
+      const foundId = companyIdOf(location);
+      // What GoHighLevel says wins over GHL_COMPANY_ID, which is only a fallback.
+      const companyId = foundId || config.companyId;
+      if (foundId) discovered.companyId = foundId;
       if (ok2xx(location)) {
         add('token', 'Token de la agencia', 'ok', `GoHighLevel lo acepta${companyId ? ` · ID de la agencia: ${companyId}` : ''}.`, location.ms);
       } else {
         add('token', 'Token de la agencia', 'fail', refusal(location, 'locations.readonly'), location.ms);
+      }
+      if (foundId && config.companyId && foundId !== config.companyId) {
+        add('company_id', 'ID de la agencia', 'warn', `GHL_COMPANY_ID (${config.companyId}) no coincide con la agencia de Eximia según GoHighLevel (${foundId}). El panel usa ${foundId}: corrige o borra GHL_COMPANY_ID.`);
       }
 
       // 2. What the token can read, one family at a time.
@@ -203,12 +220,13 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
           id: 'company',
           label: 'Datos de la agencia',
           scope: 'companies.readonly',
+          agencyOnly: true,
           state: ok2xx(comp) ? 'ok' : 'warn',
           detail: ok2xx(comp) ? 'Acceso OK' : refusal(comp, 'companies.readonly'),
         });
         const results = await Promise.all(PROBES.map(async (p) => ({ p, res: await direct(p.path(cid), p.version) })));
         for (const { p, res } of results) {
-          permissions.push({ id: p.id, label: p.label, scope: p.scope, state: ok2xx(res) ? 'ok' : 'warn', detail: ok2xx(res) ? 'Acceso OK' : refusal(res, p.scope) });
+          permissions.push({ id: p.id, label: p.label, scope: p.scope, agencyOnly: Boolean(p.agencyOnly), state: ok2xx(res) ? 'ok' : 'warn', detail: ok2xx(res) ? 'Acceso OK' : refusal(res, p.scope) });
         }
       }
 
@@ -224,10 +242,12 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
           ? 'Este token también lee contactos de Eximia.'
           : 'No: GoHighLevel no lo permite con un token de agencia (normal). Para los datos de Eximia, Muse usa la API de Eximia.',
       });
-      const agencyReads = permissions.filter((p) => p.scope && p.state === 'ok').length;
-      if (inside && agencyReads === 0) {
-        add('kind', 'Tipo de token', 'fail', 'Parece un token de SUBCUENTA, no de la agencia: lee contactos pero nada de la agencia. Crea la Private Integration en la vista de Agencia (Agency Settings).');
+      // Reads contacts but nothing only an agency token can read: a sub-account token.
+      const agencyOnlyReads = permissions.filter((p) => p.agencyOnly && p.state === 'ok').length;
+      if (inside && agencyOnlyReads === 0) {
+        add('kind', 'Tipo de token', 'fail', 'Parece un token de SUBCUENTA, no de la agencia: lee contactos de Eximia pero nada que solo la agencia puede leer. Crea la Private Integration en la vista de Agencia (Agency Settings), no dentro de una subcuenta.');
       }
+      for (const p of permissions) delete p.agencyOnly;
 
       const missing = permissions.filter((p) => p.scope && p.state !== 'ok');
       if (companyId) {
@@ -257,10 +277,16 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
         const noKey = await get(`/agency/locations/${loc}`);
         add('auth', 'Sin llave no entra nadie', noKey.status === 401 ? 'ok' : 'fail', noKey.status === 401 ? 'Una llamada sin la llave fue rechazada y no llegó a GoHighLevel.' : `Una llamada sin la llave NO fue rechazada (HTTP ${noKey.status}).`, noKey.ms);
 
-        const eximiaKey = await get(`/agency/locations/${loc}`, { 'X-Proxy-Key': ghlConfig.proxyKey });
+      }
+
+      // The Eximia key and marker only ever go to this deployment's own address, never to
+      // GHL_AGENCY_PUBLIC_HOST (a mistyped host must not receive them).
+      const self = getSelfUrl();
+      if (self) {
+        const eximiaKey = await call(self, `/agency/locations/${loc}`, { headers: { ...mark, 'X-Proxy-Key': ghlConfig.proxyKey } });
         // Marked as the Eximia panel's own test, so it is not counted as a wrong key there.
         const eximiaMark = ghlCheckMarker ? { 'X-Admin-Check': ghlCheckMarker } : {};
-        const agencyKeyOnEximia = await call(base, `/ghl/locations/${loc}`, { headers: { ...eximiaMark, 'X-Proxy-Key': config.accessKey } });
+        const agencyKeyOnEximia = await call(self, `/ghl/locations/${loc}`, { headers: { ...eximiaMark, 'X-Proxy-Key': config.accessKey } });
         const separate = eximiaKey.status === 401 && agencyKeyOnEximia.status === 401;
         add(
           'separate',
@@ -299,13 +325,26 @@ function createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, g
  *   POST /api/agency/key        reveals the agency access key for Muse
  */
 function mountAgencyAdmin(router, { config, ghlConfig, metrics, logger, requireSession, sameOriginJson, publicHost, getSelfUrl, call, ghlCheckMarker }) {
-  // The agency id, once the checks have read it (or GHL_COMPANY_ID).
-  const discovered = { companyId: config.companyId };
+  // The agency id as GoHighLevel reports it, once read (per instance; GHL_COMPANY_ID is the fallback).
+  const discovered = { companyId: null };
   const runChecks = createAgencyChecks({ config, ghlConfig, getSelfUrl, call, discovered, ghlCheckMarker });
   const hostFor = (req) => config.publicHost || publicHost(req);
+  const direct = directCall(call, config, ghlConfig);
 
-  router.get('/api/agency/overview', requireSession, (req, res) => {
-    const info = connectionInfo(config, ghlConfig, hostFor(req), discovered.companyId);
+  // Every instance can build the full Muse message: one quick read, at most once a minute
+  // while it keeps failing.
+  let lookedUpAt = -Infinity;
+  async function companyId() {
+    if (!discovered.companyId && config.enabled && Date.now() - lookedUpAt > 60_000) {
+      lookedUpAt = Date.now();
+      const found = companyIdOf(await direct(`/locations/${encodeURIComponent(ghlConfig.ghlLocationId)}`, undefined, 5000));
+      if (found) discovered.companyId = found;
+    }
+    return discovered.companyId || config.companyId;
+  }
+
+  router.get('/api/agency/overview', requireSession, async (req, res) => {
+    const info = connectionInfo(config, ghlConfig, hostFor(req), await companyId());
     sendJson(res, 200, {
       configured: config.enabled,
       started: config.started,
