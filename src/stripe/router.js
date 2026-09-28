@@ -12,11 +12,17 @@ const sha256 = (value) => crypto.createHash('sha256').update(value, 'utf8').dige
 const same = (value, expectedHash) => typeof value === 'string' && value.length > 0 && crypto.timingSafeEqual(sha256(value), expectedHash);
 const BODY_LIMIT = '1mb';
 const MAX_ERROR_BODY = 256 * 1024;
+const ERROR_BODY_TIMEOUT_MS = 5000;
 const METHODS = new Set(['GET', 'POST', 'DELETE']);
 
-/** The proxy's own answers use Stripe's error shape, plus the `proxy` explanation. */
+/**
+ * The proxy's own answers use Stripe's error shape, plus the `proxy` explanation. A write the
+ * proxy refused never reached Stripe, so it says executed "no" unless told otherwise.
+ */
 function proxyError(res, status, code, message, proxy, headers) {
-  return sendJson(res, status, { error: { type: 'proxy_error', code, message }, proxy: { summary: message, ...proxy } }, headers);
+  const write = res.req && (res.req.method === 'POST' || res.req.method === 'DELETE');
+  const explanation = { summary: message, ...(write ? { executed: 'no' } : {}), ...proxy };
+  return sendJson(res, status, { error: { type: 'proxy_error', code, message }, proxy: explanation }, headers);
 }
 
 const isJson = (type) => /^application\/(.+\+)?json\b/i.test(type || '');
@@ -92,6 +98,11 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
       const headers = { ...req.headers };
       const extra = {};
 
+      // Stripe reads GET parameters only from the query: a body would be silently ignored.
+      if (req.method === 'GET' && body) {
+        return proxyError(res, 400, 'body_on_get', 'En GET los parámetros van en la query, no en el cuerpo. No se envió nada a Stripe.', { safe_to_retry: 'yes', next: 'Repite con los parámetros en la URL, p. ej. /stripe/v1/invoices?customer=cus_...&status=open' });
+      }
+
       // v1 speaks form encoding; a JSON body is converted the way Stripe's libraries encode it.
       let json = null;
       if (body && isJson(headers['content-type'])) {
@@ -110,16 +121,13 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
         }
       }
 
-      // Reads never carry a body to Stripe.
-      if (req.method === 'GET') body = null;
-
       // Routes that are only dangerous with certain parameters: read them from query and body.
       let params = [];
       if (needsParams(req.method, path)) {
         const strict = strictParams(req.method, path);
         const pairs = (text) => [...new URLSearchParams(text).entries()];
         if (strict && (query.includes(';') || (body && body.includes(';')))) {
-          return proxyError(res, 400, 'ambiguous_params', 'Los parámetros no pueden llevar ";". No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'no', next: 'Separa los parámetros solo con "&".' });
+          return proxyError(res, 400, 'ambiguous_params', 'Los parámetros de esta ruta no pueden llevar ";" sin codificar. No se envió nada a Stripe.', { safe_to_retry: 'no', next: 'Separa los parámetros solo con "&" y escribe ";" dentro de un valor como %3B (o manda el cuerpo en JSON).' });
         }
         params = pairs(query);
         if (body) {
@@ -130,7 +138,7 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
           }
         }
         if (strict && params.some(([name]) => !CANONICAL_KEY.test(name))) {
-          return proxyError(res, 400, 'ambiguous_params', 'Algún parámetro no tiene la forma normal de Stripe (nombre o nombre[clave]). No se envió nada a Stripe.', { executed: 'no', safe_to_retry: 'no', next: 'Escribe los parámetros como external_account o metadata[clave].' });
+          return proxyError(res, 400, 'ambiguous_params', 'Algún parámetro no tiene la forma normal de Stripe (nombre o nombre[clave]). No se envió nada a Stripe.', { safe_to_retry: 'no', next: 'Escribe los nombres como email, metadata[clave] o items[0][price], sin corchetes sueltos.' });
         }
       }
 
@@ -199,6 +207,8 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
       if (status >= 400) {
         const chunks = [];
         let size = 0;
+        // A body that stalls must not keep Muse waiting past the call's budget.
+        const stall = setTimeout(() => upstream.destroy(Object.assign(new Error('stalled'), { code: 'BODY_TIMEOUT' })), ERROR_BODY_TIMEOUT_MS);
         try {
           for await (const chunk of upstream) {
             size += chunk.length;
@@ -208,8 +218,13 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
         } catch {
           // The error answer broke off: Muse still gets the explanation below.
           chunks.length = 0;
+        } finally {
+          clearTimeout(stall);
         }
-        if (size > MAX_ERROR_BODY) upstream.destroy();
+        if (size > MAX_ERROR_BODY) {
+          upstream.destroy();
+          chunks.length = 0;
+        }
         const text = Buffer.concat(chunks).toString('utf8');
         let parsed = null;
         if (!upstream.headers['content-encoding']) {

@@ -256,11 +256,16 @@ test('writes need Muse\'s own Idempotency-Key; it is sent, echoed and replays sa
   assert.equal(again.headers['idempotent-replayed'], 'true');
   assert.equal(json(again).id, json(res).id);
 
-  // Reads and v1 deletes never carry one, and none is echoed; GET bodies are dropped.
-  const read = await request(`${url}/stripe/v1/customers`, { headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x', 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'a=b' });
+  // Reads and v1 deletes never carry one, and none is echoed.
+  const read = await request(`${url}/stripe/v1/customers`, { headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x' } });
   assert.equal(read.headers['x-proxy-idempotency-key'], undefined);
   assert.equal(stripe.requests.at(-1).headers['idempotency-key'], undefined);
-  assert.equal(stripe.requests.at(-1).body, '');
+  // A GET with a body would be read by Stripe without its filters: refused, nothing sent.
+  const before = stripe.requests.length;
+  const withBody = await request(`${url}/stripe/v1/invoices`, { headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', 'Content-Length': '21' }, body: '{"customer":"cus_A"}\n' });
+  assert.equal(withBody.status, 400);
+  assert.equal(json(withBody).error.code, 'body_on_get');
+  assert.equal(stripe.requests.length, before);
   const del = await request(`${url}/stripe/v1/customers/cus_1`, { method: 'DELETE', headers: { 'X-Proxy-Key': accessKey, 'Idempotency-Key': 'x' } });
   assert.equal(del.status, 200);
   assert.equal(del.headers['x-proxy-idempotency-key'], undefined);
@@ -516,6 +521,60 @@ test('after a lost first attempt, a later error never claims nothing happened', 
   const reused = await request(`${url}/stripe/v1/subscriptions`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
   assert.equal(json(reused).proxy.executed, 'unknown');
   assert.equal(json(reused).proxy.safe_to_retry, 'no');
+});
+
+test('a retried write never ends as "not done" when the last answer says nothing about the first', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  const cases = [
+    ['drop then real rate limit', ['drop', { status: 429, headers: { 'Stripe-Rate-Limited-Reason': 'global-rate' }, body: { error: { type: 'invalid_request_error', code: 'rate_limit', message: 'Too many' } } }]],
+    ['500 then 400 rate_limit', [{ status: 500 }, { status: 400, body: { error: { type: 'invalid_request_error', code: 'rate_limit', message: 'Too many' } } }]],
+    ['drop then unreadable 400', ['drop', { status: 400, body: 'x' }]],
+  ];
+  for (const [name, steps] of cases) {
+    stripe.script('POST /v1/payment_intents', steps);
+    const res = await request(`${url}/stripe/v1/payment_intents`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
+    const p = json(res).proxy;
+    assert.equal(p.executed, 'unknown', name);
+    assert.equal(p.safe_to_retry, 'same-key', name);
+    assert.doesNotMatch(p.next, /NUEVO/, name);
+  }
+  // A replayed answer IS the first attempt's result, so it stays authoritative.
+  stripe.script('POST /v1/charges', ['drop', { status: 402, headers: { 'Idempotent-Replayed': 'true' }, body: { error: { type: 'card_error', code: 'card_declined', message: 'declined' } } }]);
+  const replay = await request(`${url}/stripe/v1/charges`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } });
+  assert.equal(json(replay).proxy.executed, 'no');
+});
+
+test('idempotency errors are recognised in every shape Stripe uses', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  stripe.script('POST /v1/refunds', [{ status: 404, body: { error: { type: 'idempotency_error', message: 'used on another route' } } }]);
+  const v1 = json(await request(`${url}/stripe/v1/refunds`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } }));
+  assert.equal(v1.proxy.executed, 'unknown');
+  assert.match(v1.proxy.summary, /ya se procesó/);
+  stripe.script('POST /v2/core/accounts', Array(3).fill({ status: 409, body: { error: { code: 'idempotency_error', message: 'different params' } } }));
+  const v2 = json(await request(`${url}/stripe/v2/core/accounts`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body: '{}' }));
+  assert.match(v2.proxy.summary, /ya se procesó/);
+});
+
+test('the proxy\'s own refusals of writes say executed "no"', async (t) => {
+  const { url, accessKey } = await setup(t);
+  const bad = json(await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body: '{nope' }));
+  assert.equal(bad.proxy.executed, 'no');
+  const nokey = json(await request(`${url}/stripe/v1/customers`, { method: 'POST' }));
+  assert.equal(nokey.proxy.executed, 'no');
+  const read = json(await request(`${url}/stripe/v1/customers`));
+  assert.equal(read.proxy.executed, undefined);
+});
+
+test('Issuing card reads and account writes: strict spellings; metadata keys stay free', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  for (const path of ['/v1/issuing/cards/ic_1?limit=1;expand[]=number', '/v1/issuing/cards/ic_1?[expand][]=number', '/v1/issuing/cards/ic_1?expand[]=%20NUMBER']) {
+    const res = await request(url, { path: `/stripe${path}`, headers: { 'X-Proxy-Key': accessKey } });
+    assert.ok(res.status === 400 || res.status === 403, path);
+  }
+  assert.equal(stripe.requests.length, 0);
+  const meta = await request(`${url}/stripe/v1/accounts/acct_1`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body: JSON.stringify({ metadata: { 'ghl-contact-id': 'abc', 'teléfono': '1', note: 'a;b' } }) });
+  assert.equal(meta.status, 200);
+  assert.equal(form(stripe.requests.at(-1).body)['metadata[ghl-contact-id]'], 'abc');
 });
 
 test('error answers that are not JSON still come with the explanation', async (t) => {

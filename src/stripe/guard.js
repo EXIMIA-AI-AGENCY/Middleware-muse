@@ -73,9 +73,10 @@ const V1_ACCOUNT_KEYS = /^(external_account|bank_account|settings\[payouts\]|set
 const V2_ACCOUNT_KEYS = /(^|\.)(payout_methods|default_outbound_destination|outbound_payments|outbound_transfers)(\.|$)/;
 // Issuing cards reveal the full card number and CVC only when asked to expand them.
 const ISSUING_CARDS = R(`/v1/issuing/cards(/${SEG})?`);
-const SECRET_EXPAND = /(^|\.)(number|cvc)$/;
-// Parameter names exactly as Stripe writes them (a[b][0]); anything else could be read two ways.
-const CANONICAL_KEY = /^[A-Za-z0-9_]+(\[[A-Za-z0-9_]*\])*$/;
+const SECRET_EXPAND = /(^|\.)(number|cvc)$/i;
+// Parameter names exactly as Stripe writes them (a[b][0], metadata[any key]); a stray bracket
+// or separator could be read two ways.
+const CANONICAL_KEY = /^[A-Za-z0-9_]+(\[[^[\]&=;]*\])*$/;
 
 const INVALID_SEGMENT = /[/\\;\x00-\x1f\x7f]/;
 
@@ -138,7 +139,7 @@ function blockedBy(method, path, params, { allowMoneyOut, allowAccessGrants }) {
   if (!allowAccessGrants) {
     const rule = ACCESS.find((r) => r.methods.includes(method) && r.re.test(path));
     if (rule) return { tier: 'access', what: rule.what };
-    if (ISSUING_CARDS.test(path) && params.some(([name, value]) => /^expand(\[|$)/.test(name) && SECRET_EXPAND.test(String(value)))) {
+    if (ISSUING_CARDS.test(path) && params.some(([name, value]) => /^expand(\[|$)/.test(name) && SECRET_EXPAND.test(String(value).trim()))) {
       return { tier: 'access', what: 'leer el número completo o el CVC de una tarjeta' };
     }
   }
@@ -149,8 +150,8 @@ function blockedBy(method, path, params, { allowMoneyOut, allowAccessGrants }) {
 const needsParams = (method, path) =>
   (method === 'POST' && (V1_ACCOUNT_ROUTES.some((re) => re.test(path)) || V2_ACCOUNT_ROUTES.some((re) => re.test(path)))) || ISSUING_CARDS.test(path);
 
-/** Routes whose parameters must be written in one unambiguous way (v1 account create/update). */
-const strictParams = (method, path) => method === 'POST' && V1_ACCOUNT_ROUTES.some((re) => re.test(path));
+/** Routes whose parameters must be written in one unambiguous way (v1 account create/update, Issuing card reads). */
+const strictParams = (method, path) => (method === 'POST' && V1_ACCOUNT_ROUTES.some((re) => re.test(path))) || ISSUING_CARDS.test(path);
 
 /**
  * JSON -> Stripe form encoding, the way Stripe's own libraries send it:

@@ -31,15 +31,44 @@ function explainStripeError({ method, status, headers, body, idempotencyKey, att
   if (headers['idempotent-replayed'] === 'true') base.replayed = true;
   const out = (summary, executed, safe, next) => ({ ...base, summary, ...(write ? { executed } : {}), safe_to_retry: safe, next });
 
-  // Without an Idempotency-Key (v1 DELETE) a retried call answers for itself only: the lost
-  // first attempt may be the one that acted (e.g. deleted, so the retry gets 404).
-  if (write && maybeRan && !idempotencyKey && status < 500) {
+  const replayed = headers['idempotent-replayed'] === 'true';
+  const rateLimited = status === 429 || e.code === 'rate_limit' || e.code === 'lock_timeout';
+  // Answers Stripe gives before (or without) its idempotency layer say nothing about an
+  // earlier attempt of the same call; an unreadable body says nothing at all.
+  const inconclusive = rateLimited || status === 409 || status >= 500 || body === null || typeof body !== 'object';
+
+  if (e.type === 'idempotency_error' || e.code === 'idempotency_error') {
     return out(
-      `Un intento anterior no recibió respuesta y pudo haberse hecho; el siguiente respondió${detail}`,
+      `Ese Idempotency-Key ya se usó con otros parámetros o en otra ruta${detail} La petición original con esa clave ya se procesó.`,
       'unknown',
       'no',
-      status === 404 ? 'Lo más probable es que ya esté hecho (Stripe dice que ya no existe). Compruébalo leyendo el objeto antes de hacer nada más.' : 'Comprueba en Stripe si ya se hizo antes de repetir.',
+      'Comprueba en Stripe qué hizo la petición original antes de mandar nada. Solo si de verdad es una acción NUEVA, mándala con un Idempotency-Key nuevo.',
     );
+  }
+
+  // A retried write: an earlier attempt may already have acted.
+  if (write && maybeRan && !replayed && (inconclusive || !idempotencyKey)) {
+    if (!idempotencyKey) {
+      return out(
+        `Un intento anterior no recibió respuesta y pudo haberse hecho; el siguiente respondió${detail}`,
+        'unknown',
+        'no',
+        status === 404 ? 'Lo más probable es que ya esté hecho (Stripe dice que ya no existe). Compruébalo leyendo el objeto antes de hacer nada más.' : 'Comprueba en Stripe si ya se hizo antes de repetir.',
+      );
+    }
+    return out(
+      `Un intento anterior pudo haberse hecho en Stripe y el último respondió${detail} No se sabe si la acción se hizo.`,
+      'unknown',
+      'same-key',
+      `No uses un Idempotency-Key nuevo. Espera unos segundos y repite exactamente la misma petición con el MISMO Idempotency-Key (${idempotencyKey}): si ya se hizo, Stripe devolverá ese resultado sin repetirla.`,
+    );
+  }
+
+  // Without a readable answer, a write cannot be declared "not done".
+  if (write && (body === null || typeof body !== 'object') && status !== 402) {
+    return idempotencyKey
+      ? out(`Stripe respondió HTTP ${status} sin un error legible. No se sabe si la acción se hizo.`, 'unknown', 'same-key', `Repite exactamente la misma petición con el MISMO Idempotency-Key (${idempotencyKey}) para obtener la respuesta de Stripe: nunca la hará dos veces.`)
+      : out(`Stripe respondió HTTP ${status} sin un error legible. No se sabe si se hizo.`, 'unknown', 'yes', 'Repite la misma petición: borrar dos veces no hace nada más (si ya se hizo, Stripe dirá que no existe).');
   }
 
   if (e.code === 'approval_required') {
@@ -61,14 +90,6 @@ function explainStripeError({ method, status, headers, body, idempotencyKey, att
   if (status === 404) {
     return out(`No existe en Stripe${detail} Revisa el ID y el modo (live o test).`, 'no', 'no', 'Corrige el ID antes de volver a intentarlo.');
   }
-  if (e.type === 'idempotency_error') {
-    return out(
-      `Ese Idempotency-Key ya se usó con otros parámetros o en otra ruta${detail} La petición original con esa clave ya se procesó.`,
-      'unknown',
-      'no',
-      'Comprueba en Stripe qué hizo la petición original antes de mandar nada. Solo si de verdad es una acción NUEVA, mándala con un Idempotency-Key nuevo.',
-    );
-  }
   if (status === 409) {
     return out(
       `Otra petición con el mismo Idempotency-Key sigue en curso en Stripe${detail}`,
@@ -77,9 +98,10 @@ function explainStripeError({ method, status, headers, body, idempotencyKey, att
       `Espera unos segundos y repite exactamente la misma petición con el MISMO Idempotency-Key (${idempotencyKey}): Stripe devolverá su resultado sin hacerla dos veces.`,
     );
   }
-  if (status === 429) {
+  if (rateLimited) {
     const reason = headers['stripe-rate-limited-reason'];
-    return out(`Stripe está limitando las llamadas${reason ? ` (${reason})` : ''}${detail}`, 'no', 'after-wait', 'Espera unos segundos y repite, más despacio (una llamada a la vez).');
+    const again = idempotencyKey ? `, con el MISMO Idempotency-Key (${idempotencyKey})` : '';
+    return out(`Stripe está limitando las llamadas${reason ? ` (${reason})` : ''}${detail}`, 'no', 'after-wait', `Espera unos segundos y repite la misma petición${again}, más despacio (una llamada a la vez).`);
   }
   if (status >= 500) {
     if (write && !idempotencyKey) {

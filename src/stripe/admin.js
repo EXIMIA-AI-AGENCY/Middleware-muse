@@ -109,6 +109,7 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 ## Cómo se habla con Stripe
 
 - Métodos: GET para leer, POST para crear o cambiar, DELETE para borrar (no hay PUT ni PATCH).
+- En GET, los parámetros van SIEMPRE en la query (\`?customer=cus_...&limit=10\`); un GET con cuerpo se rechaza.
 - Cuerpo de /v1: \`application/x-www-form-urlencoded\` (\`metadata[pedido]=123\`, \`items[0][price]=price_...\`, \`expand[]=customer\`). También puedes mandar JSON: el proxy lo convierte al formato de Stripe (verás \`X-Proxy-Converted: json-to-form\`). Para /v2 usa JSON.
 - Importes en la unidad más pequeña de la moneda y como entero: 10,50 USD = \`amount=1050\`, \`currency=usd\` (minúsculas). OJO: en monedas sin decimales (jpy, krw, clp, vnd, xof…) el importe va tal cual: 1000 JPY = \`amount=1000\`. Si dudas, pregúntame antes de cobrar.
 - Listas: \`limit\` de 1 a 100 (por defecto 10) y \`has_more\`; para la página siguiente usa \`starting_after=<id del último>\`.
@@ -130,7 +131,7 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 
 Cuando algo falla, la respuesta es el error de Stripe (\`{"error": {"type", "code", "message", "param"}}\`) más un objeto \`proxy\`:
 - \`proxy.summary\`: qué pasó, en español. Si algo falló, díselo al usuario con estas palabras.
-- \`proxy.executed\` (en POST y DELETE): \`"yes"\` · \`"no"\` = no se hizo nada · \`"unknown"\` = no se sabe (sigue \`proxy.next\`).
+- \`proxy.executed\` (en POST y DELETE que fallan): \`"no"\` = no se hizo nada · \`"unknown"\` = no se sabe (sigue \`proxy.next\`: repite con el MISMO Idempotency-Key). Una respuesta 2xx significa que se hizo.
 - \`proxy.safe_to_retry\`: \`"yes"\` · \`"no"\` · \`"after-wait"\` · \`"same-key"\` (repite solo con el mismo Idempotency-Key).
 - \`proxy.next\`: qué hacer ahora.
 Las respuestas del propio proxy tienen \`error.type = "proxy_error"\`.
@@ -291,7 +292,8 @@ function createStripeChecks({ config, client, getSelfUrl, call, ghlConfig, ghlCh
         if (probesGuard.length) {
           const answers = await Promise.all(probesGuard.map(([m, p]) => request(m, p, { 'X-Proxy-Key': config.accessKey, 'Content-Type': 'application/x-www-form-urlencoded' })));
           const blocked = answers.every((a) => a.status === 403 && /blocked_by_proxy/.test(a.text || ''));
-          add('guard', 'Bloqueos activos', blocked ? 'ok' : 'fail', blocked ? 'Una prueba de payout/cuenta bancaria y otra de webhook fueron bloqueadas sin llegar a Stripe.' : `Un bloqueo NO respondió como debe (HTTP ${answers.map((a) => a.status).join(' / ')}).`);
+          const tested = probesGuard.map(([, p]) => (p.includes('webhook') ? 'webhook' : 'payout/cuenta bancaria')).join(' y ');
+          add('guard', 'Bloqueos activos', blocked ? 'ok' : 'fail', blocked ? `Pruebas de ${tested} bloqueadas sin llegar a Stripe.` : `Un bloqueo NO respondió como debe (HTTP ${answers.map((a) => a.status).join(' / ')}).`);
         }
       }
 
