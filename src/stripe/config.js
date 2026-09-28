@@ -114,6 +114,9 @@ function loadStripeConfig(env = process.env, { ghl, others = [] } = {}) {
     // Payouts, transfers and payout-destination changes cannot be undone: off unless the
     // owner turns them on explicitly.
     allowMoneyOut: (env.STRIPE_ALLOW_MONEY_OUT ?? '').trim() === 'true',
+    // Webhooks, public file links, login links, card-data forwarding: lasting access from
+    // outside, and they could break what is already connected to Stripe. Off unless turned on.
+    allowAccessGrants: (env.STRIPE_ALLOW_ACCESS_GRANTS ?? '').trim() === 'true',
   });
 }
 

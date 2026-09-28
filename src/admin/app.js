@@ -15,7 +15,7 @@
   let lastOverviewOk = null; // Date of the last successful overview
   let offlineSince = null;
   let submitting = false;
-  const VIEWS = ['ghl', 'agency', 'kraken'];
+  const VIEWS = ['ghl', 'agency', 'kraken', 'stripe'];
   let view = 'ghl'; // one of VIEWS
   let lastKrakenChecks = null;
   let krakenStarted = false; // first visit to the Kraken tab loads it
@@ -23,6 +23,9 @@
   let lastAgencyChecks = null;
   let agencyStarted = false; // first visit to the agency tab loads it
   let agencyTimer = null;
+  let lastStripeChecks = null;
+  let stripeStarted = false; // first visit to the Stripe tab loads it
+  let stripeTimer = null;
 
   // ---------- helpers ----------
 
@@ -434,7 +437,8 @@
     clearTimeout(keyTimer);
     clearTimeout(krakenTimer);
     clearTimeout(agencyTimer);
-    for (const [nodeId, buttonId] of [['proxy-key', 'reveal-key'], ['k-access-key', 'k-reveal-key'], ['a-access-key', 'a-reveal-key']]) {
+    clearTimeout(stripeTimer);
+    for (const [nodeId, buttonId] of [['proxy-key', 'reveal-key'], ['k-access-key', 'k-reveal-key'], ['a-access-key', 'a-reveal-key'], ['s-access-key', 's-reveal-key']]) {
       $(nodeId).textContent = MASK;
       $(nodeId).classList.remove('is-revealed');
       $(buttonId).textContent = 'Mostrar';
@@ -563,6 +567,12 @@
         runAgencyChecks();
       }
       refreshAgency();
+    } else if (view === 'stripe') {
+      if (!stripeStarted) {
+        stripeStarted = true;
+        runStripeChecks();
+      }
+      refreshStripe();
     } else {
       refresh();
     }
@@ -958,6 +968,196 @@
     );
   }
 
+  // ---------- Stripe ----------
+
+  const S_TITLES = {
+    ok: 'Stripe funciona',
+    warn: 'Stripe funciona, con avisos',
+    fail: 'Stripe tiene un problema',
+    setup: 'Falta configurar Stripe',
+    missing: 'Stripe no está disponible',
+    error: 'No se pudo verificar',
+  };
+  const S_SUBS = {
+    ok: 'La clave, sus permisos y el proxy responden bien. Muse puede usarlo.',
+    warn: 'Lo esencial funciona. Revisa los avisos de abajo.',
+    fail: 'Revisa el punto en rojo. Muse no podrá usar Stripe hasta corregirlo.',
+    setup: 'Sigue los 3 pasos de abajo (unos 5 minutos). GHL y Kraken siguen funcionando igual.',
+    missing: 'Este servidor todavía no tiene la parte de Stripe.',
+    error: 'La verificación no respondió. Pulsa «Verificar ahora» para intentarlo de nuevo.',
+  };
+
+  function renderStripeStatus(state, when) {
+    const badge = $('s-status-badge');
+    const iconState = state === 'setup' || state === 'missing' || state === 'error' ? 'warn' : state;
+    badge.dataset.state = iconState;
+    badge.replaceChildren(icon(ICON[iconState] || ICON.warn));
+    $('tab-stripe').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state === 'error' ? 'warn' : state;
+    $('s-status-title').textContent = S_TITLES[state];
+    $('s-status-sub').textContent = `${S_SUBS[state]}${when ? ` Verificado ${ago(when)}.` : ''}`;
+  }
+
+  function renderStripeChecks(result) {
+    lastStripeChecks = result;
+    renderStripeStatus(result.overall, new Date(result.ranAt));
+    $('s-checks').replaceChildren(
+      ...result.checks.map((c) =>
+        el(
+          'li',
+          { class: 'check', 'data-state': c.status },
+          stateIcon(c.status),
+          el('div', {}, el('div', { class: 'check-label', text: c.label }), el('div', { class: 'check-detail', text: c.detail })),
+          el('span', { class: 'check-ms', text: c.ms === null ? '' : fmtMs(c.ms) }),
+        ),
+      ),
+    );
+    $('s-perms').replaceChildren(
+      ...(result.permissions.length
+        ? result.permissions.map((p) => permItem({ ...p, detail: p.perm ? `${p.detail} · ${p.perm}` : p.detail }))
+        : [el('li', { class: 'perm-empty muted small', text: 'Aparecerán cuando la clave esté puesta y verificada.' })]),
+    );
+  }
+
+  async function runStripeChecks() {
+    const button = $('s-run-checks');
+    button.disabled = true;
+    button.textContent = 'Verificando…';
+    $('s-status-badge').dataset.state = 'pending';
+    try {
+      const { status, data } = await api('/stripe/checks', { method: 'POST' });
+      if (status === 200 && data) renderStripeChecks(data);
+      else if (status === 404) renderStripeStatus('missing');
+      else toast('No se pudo verificar Stripe. Intenta de nuevo.', { error: true });
+    } catch (err) {
+      if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Verificar ahora';
+      if (lastStripeChecks) renderStripeStatus(lastStripeChecks.overall, new Date(lastStripeChecks.ranAt));
+      else if ($('s-status-badge').dataset.state === 'pending') renderStripeStatus('error');
+      refreshStripe();
+    }
+  }
+
+  function renderStripeOverview(o) {
+    $('s-setup').hidden = o.configured;
+    $('s-connect').hidden = !o.configured;
+    $('s-problems').hidden = !(o.started && o.problems.length);
+    $('s-problems').replaceChildren(...o.problems.map((p) => el('li', { text: p })));
+    if (o.configured) $('s-muse-message').textContent = o.museMessage;
+
+    const mode = $('s-mode');
+    mode.dataset.mode = o.mode || 'test';
+    mode.textContent = o.mode === 'live' ? 'LIVE: dinero real' : o.mode === 'test' ? 'TEST: nada es real' : 'Sin clave';
+    const money = $('s-money-line');
+    money.className = o.allowMoneyOut ? 'yes' : 'no';
+    money.textContent = o.allowMoneyOut ? 'Payouts, transferencias y cambios de cuenta bancaria: PERMITIDOS (no se pueden deshacer)' : 'Payouts, transferencias y cambios de cuenta bancaria: bloqueados en el proxy';
+    const access = $('s-access-line');
+    access.className = o.allowAccessGrants ? 'yes' : 'no';
+    access.textContent = o.allowAccessGrants ? 'Webhooks, enlaces públicos y enlaces de acceso: PERMITIDOS' : 'Webhooks, enlaces públicos y enlaces de acceso: bloqueados (protegen lo que ya está conectado a Stripe)';
+
+    const account = lastStripeChecks && lastStripeChecks.account;
+    $('s-security').replaceChildren(
+      el('dt', { text: 'Cuenta' }),
+      el('dd', { text: account ? `${account.name || account.id}${account.country ? ` · ${account.country}` : ''}` : '—' }),
+      el('dt', { text: 'Llave de Muse' }),
+      el('dd', { text: o.key ? `${o.key.length} caracteres (${o.key.source === 'env' ? 'STRIPE_PROXY_KEY' : 'hecha con la clave de Stripe'})` : '—' }),
+      el('dt', { text: 'Clave de Stripe' }),
+      el('dd', { text: o.key ? `${o.key.secretHint} (${o.keyKind === 'restricted' ? 'restringida' : 'secreta'}; nunca sale del servidor)` : 'Sin poner' }),
+      el('dt', { text: 'Versión del API' }),
+      el('dd', { text: o.connection.stripe_version }),
+      el('dt', { text: 'Límite de llamadas' }),
+      el('dd', { text: `${o.rateLimit.max} cada ${o.rateLimit.windowSeconds} s` }),
+      el('dt', { text: 'Dirección' }),
+      el('dd', { text: o.connection.stripe_host }),
+    );
+
+    const m = o.metrics;
+    const chips = [
+      ['Llamadas de Muse', m.calls, ''],
+      ['Bloqueadas por el proxy', m.blocked, m.blocked ? 'warn' : ''],
+      ['Llave incorrecta', m.rejectedKey, m.rejectedKey ? 'warn' : ''],
+      ['Frenadas por el límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
+      ['Stripe negó permiso', m.ghlDenied, m.ghlDenied ? 'warn' : ''],
+      ['Sin respuesta de Stripe', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
+      ['Canceladas por Muse', m.cancelled, m.cancelled ? 'warn' : ''],
+    ];
+    $('s-counters').replaceChildren(...chips.map(([label, value, tone]) => el('span', { class: `chip ${tone}` }, el('strong', { text: fmtNum(value) }), label)));
+    $('s-activity').replaceChildren(
+      ...(m.recent.length
+        ? m.recent.map((r) =>
+            el(
+              'tr',
+              {},
+              el('td', { class: 'time', text: fmtTime(r.at) }),
+              el('td', { class: 'path', text: `${r.method} ${r.path}` }),
+              el('td', { class: 'num' }, el('span', { class: `status-pill s${String(r.status)[0]}`, text: String(r.status) })),
+              el('td', { class: 'num', text: fmtMs(r.ghlMs) }),
+              el('td', { class: 'num col-total', text: fmtMs(r.totalMs) }),
+            ),
+          )
+        : [el('tr', {}, el('td', { class: 'empty', colspan: 5, text: 'Todavía no hay llamadas de Muse a Stripe.' }))]),
+    );
+    $('s-activity-updated').textContent = `Actualizado ${fmtTime(new Date())}`;
+    if (!lastStripeChecks && !o.configured) renderStripeStatus('setup');
+  }
+
+  async function refreshStripe() {
+    try {
+      const { status, data } = await api('/stripe/overview');
+      if (status === 200 && data) renderStripeOverview(data);
+      else if (status === 404) renderStripeStatus('missing');
+    } catch {
+      // the GHL status already reports connection problems
+    }
+  }
+
+  function showStripeKey(key) {
+    const node = $('s-access-key');
+    node.textContent = key;
+    node.classList.add('is-revealed');
+    $('s-reveal-key').textContent = 'Ocultar';
+    clearTimeout(stripeTimer);
+    stripeTimer = setTimeout(hideKey, KEY_VISIBLE_MS);
+  }
+
+  async function fetchStripeKey() {
+    const { status, data } = await api('/stripe/key', { method: 'POST' });
+    if (status !== 200 || !data || !data.accessKey) throw new Error('key');
+    return data.accessKey;
+  }
+
+  function wireStripe() {
+    $('s-run-checks').addEventListener('click', runStripeChecks);
+    $('s-copy-muse').addEventListener('click', async () => {
+      const text = $('s-muse-message').textContent;
+      if (!text || text === '—') return toast('Espera un segundo: el mensaje aún se está cargando.', { error: true });
+      if (await copyText(text)) {
+        toast('Mensaje copiado. Pégalo en Muse.');
+      } else {
+        $('s-muse-message').closest('details').open = true;
+        selectNode($('s-muse-message'));
+        toast('Tu navegador no dejó copiar. El mensaje está seleccionado: mantén pulsado para copiarlo.', { error: true });
+      }
+    });
+    $('s-reveal-key').addEventListener('click', async () => {
+      if ($('s-access-key').classList.contains('is-revealed')) return hideKey();
+      try {
+        showStripeKey(await fetchStripeKey());
+      } catch (err) {
+        if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+        else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
+      }
+    });
+    $('s-copy-key').addEventListener('click', () =>
+      copySecret(fetchStripeKey, (key) => {
+        showStripeKey(key);
+        selectNode($('s-access-key'));
+        toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
+      }),
+    );
+  }
+
   // ---------- wiring ----------
 
   function wireApp() {
@@ -1020,6 +1220,7 @@
     });
     wireKraken();
     wireAgency();
+    wireStripe();
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) hideKey();
       else if (!$('app').hidden) refreshActive();
@@ -1039,6 +1240,7 @@
   function refreshActive() {
     if (view === 'kraken') refreshKraken();
     else if (view === 'agency') refreshAgency();
+    else if (view === 'stripe') refreshStripe();
     else refresh();
   }
 

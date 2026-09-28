@@ -325,9 +325,9 @@ code, pre { font-family: var(--mono); font-size: 13px; }
   .perm-list { grid-template-columns: 1fr; }
 }
 
-/* Switch GHL Eximia | GHL Agencia | Kraken */
+/* Switch GHL Eximia | GHL Agencia | Kraken | Stripe */
 .switch {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
   padding: 6px; margin: 0 0 16px;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 16px;
 }
@@ -346,9 +346,12 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .switch-dot[data-state="ok"] { background: var(--ok); }
 .switch-dot[data-state="warn"], .switch-dot[data-state="setup"] { background: var(--warn); }
 .switch-dot[data-state="fail"] { background: var(--fail); }
+@media (max-width: 760px) {
+  .switch-btn { font-size: 15px; gap: 6px; padding: 6px 4px; }
+}
 @media (max-width: 520px) {
-  .switch { gap: 4px; padding: 4px; }
-  .switch-btn { font-size: 14px; gap: 6px; padding: 6px 4px; min-height: 52px; }
+  .switch { gap: 4px; padding: 4px; grid-template-columns: repeat(2, 1fr); }
+  .switch-btn { font-size: 15px; gap: 6px; padding: 6px 4px; min-height: 48px; }
   .switch-dot { width: 8px; height: 8px; }
 }
 
@@ -370,6 +373,8 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .card-methods .perm-guide { margin-bottom: 4px; }
 .mode-badge[data-mode="blocked"] { background: var(--ok-soft); color: var(--ok); }
 .mode-badge[data-mode="allowed"] { background: var(--warn-soft); color: var(--warn); }
+.mode-badge[data-mode="test"] { background: var(--surface-2); color: var(--muted); }
+.mode-badge[data-mode="live"] { background: var(--warn-soft); color: var(--warn); }
 #a-scopes { margin: 8px 0; }
 .perm-guide { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .perm-guide li { padding-left: 24px; position: relative; }

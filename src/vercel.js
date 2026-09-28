@@ -39,7 +39,18 @@ function loadAgency() {
   }
 }
 const agency = loadAgency();
-const app = createApp(config, logger, { kraken, agency });
+// Same rule for Stripe: optional, isolated, never takes the rest down.
+function loadStripe() {
+  try {
+    const others = [kraken && kraken.config.accessKey, agency && agency.config.accessKey].filter(Boolean);
+    return require('./stripe').tryCreateStripe({ env: process.env, ghlConfig: config, logger, others });
+  } catch (err) {
+    logger.error({ msg: 'stripe_disabled', name: err && err.name });
+    return null;
+  }
+}
+const stripe = loadStripe();
+const app = createApp(config, logger, { kraken, agency, stripe });
 // The dashboard tests the proxy through its public production URL, exactly like Muse.
 const productionHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
 if (productionHost) app.locals.selfUrl = `https://${productionHost}`;

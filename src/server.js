@@ -40,7 +40,18 @@ function loadAgency() {
   }
 }
 const agency = loadAgency();
-const app = createApp(config, logger, { kraken, agency });
+// Same rule for Stripe: optional, isolated, never takes the rest down.
+function loadStripe() {
+  try {
+    const others = [kraken && kraken.config.accessKey, agency && agency.config.accessKey].filter(Boolean);
+    return require('./stripe').tryCreateStripe({ env: process.env, ghlConfig: config, logger, others });
+  } catch (err) {
+    logger.error({ msg: 'stripe_disabled', name: err && err.name });
+    return null;
+  }
+}
+const stripe = loadStripe();
+const app = createApp(config, logger, { kraken, agency, stripe });
 const server = http.createServer(app);
 // During shutdown, answer on any connection and then close it, so no new work lands here.
 server.prependListener('request', (req, res) => {

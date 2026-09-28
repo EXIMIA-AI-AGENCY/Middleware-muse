@@ -27,7 +27,7 @@
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 16h14M17 10l6 6-6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <div>
           <h1>ghl-proxy</h1>
-          <p class="muted">GoHighLevel · Agencia · Kraken ↔ Muse</p>
+          <p class="muted">GoHighLevel · Agencia · Kraken · Stripe ↔ Muse</p>
         </div>
       </div>
       <label for="pin" class="pin-label"><svg class="icon"><use href="#i-lock"/></svg> Ingresa tu PIN</label>
@@ -64,6 +64,7 @@
       <button type="button" role="tab" id="tab-ghl" class="switch-btn" data-view="ghl" aria-selected="true" aria-controls="view-ghl"><span class="switch-dot" aria-hidden="true"></span>GHL Eximia</button>
       <button type="button" role="tab" id="tab-agency" class="switch-btn" data-view="agency" aria-selected="false" aria-controls="view-agency" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>GHL Agencia</button>
       <button type="button" role="tab" id="tab-kraken" class="switch-btn" data-view="kraken" aria-selected="false" aria-controls="view-kraken" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>Kraken</button>
+      <button type="button" role="tab" id="tab-stripe" class="switch-btn" data-view="stripe" aria-selected="false" aria-controls="view-stripe" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>Stripe</button>
     </div>
 
     <main class="grid" id="view-ghl" role="tabpanel" aria-labelledby="tab-ghl">
@@ -421,6 +422,124 @@
           </table>
         </div>
         <p class="muted small">Solo se guarda el método, el resultado y el tiempo. Nunca saldos, órdenes ni claves.</p>
+      </section>
+    </main>
+    <!-- Stripe -->
+    <main class="grid" id="view-stripe" role="tabpanel" aria-labelledby="tab-stripe" hidden>
+      <!-- Estado -->
+      <section class="card card-status" aria-labelledby="s-status-title">
+        <div class="status-head">
+          <div id="s-status-badge" class="status-badge" data-state="pending" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></div>
+          <div class="status-text">
+            <h2 id="s-status-title">Verificando…</h2>
+            <p id="s-status-sub" class="muted">Probando la clave de Stripe, sus permisos y el proxy.</p>
+          </div>
+          <button id="s-run-checks" type="button" class="btn">Verificar ahora</button>
+        </div>
+        <ul id="s-checks" class="checklist" aria-live="polite"></ul>
+      </section>
+
+      <!-- Configurar -->
+      <section class="card card-wide card-setup" id="s-setup" aria-labelledby="s-setup-title" hidden>
+        <h2 id="s-setup-title">Configurar Stripe (una sola vez)</h2>
+        <ul id="s-problems" class="problems" hidden></ul>
+        <ol class="steps">
+          <li>
+            <h3>Crea una clave restringida en Stripe, solo para Muse</h3>
+            <p class="muted small">Stripe → <strong>Developers → API keys</strong> → <strong>Create restricted key</strong>. Nombre: «Muse». Pon todos los recursos en <strong>Write</strong> (o en Read los que Muse solo deba leer). Si Stripe te ofrece «Authorizing agent access to your account», elígelo: añade aprobaciones de Stripe para reembolsos y cancelaciones.</p>
+            <p class="muted small">Una clave nueva y restringida se puede revocar sin afectar a lo que ya usa tu clave principal (GoHighLevel, otras apps). No uses restricciones por IP: Vercel no tiene IP fija. Stripe muestra la clave (<code>rk_live_…</code>) una sola vez.</p>
+          </li>
+          <li>
+            <h3>Pégala en Vercel (nunca en un chat)</h3>
+            <p class="muted small">Vercel → proyecto <strong>ghl-proxy-muse</strong> → <strong>Settings → Environment Variables</strong>. Añade una variable en <strong>Production</strong>, marcada como <strong>Sensitive</strong>:</p>
+            <dl class="kv kv-left">
+              <dt><code>STRIPE_SECRET_KEY</code></dt><dd>la clave <code>rk_live_…</code> (o <code>rk_test_…</code> para probar sin dinero real)</dd>
+            </dl>
+          </li>
+          <li>
+            <h3>Haz Redeploy y vuelve aquí</h3>
+            <p class="muted small">Vercel → <strong>Deployments</strong> → el último → <strong>⋯ → Redeploy</strong>. Al terminar, pulsa <strong>Verificar ahora</strong>: el panel creará una <strong>llave nueva</strong> solo para Stripe. GHL y Kraken no se tocan.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Conectar Muse -->
+      <section class="card card-wide card-connect" id="s-connect" aria-labelledby="s-connect-title" hidden>
+        <h2 id="s-connect-title">Conectar Muse a Stripe</h2>
+        <ol class="steps">
+          <li>
+            <h3>Copia este mensaje y pégalo en Muse</h3>
+            <p class="muted small">Tiene todo lo que Muse necesita: dirección, cómo hablar con Stripe, reintentos seguros, qué confirmar contigo y qué está bloqueado. No contiene ningún secreto.</p>
+            <div class="actions">
+              <button type="button" class="btn btn-primary btn-wide" id="s-copy-muse">Copiar mensaje para Muse</button>
+            </div>
+            <details class="preview">
+              <summary>Ver el mensaje</summary>
+              <pre id="s-muse-message" class="code code-scroll" tabindex="0">—</pre>
+            </details>
+          </li>
+          <li>
+            <h3>Cuando Muse te pida la llave de Stripe, pégala en su tarjeta segura</h3>
+            <p class="muted small">Es una llave <strong>distinta</strong> de las de GHL y Kraken. La clave de Stripe nunca sale del servidor. Pégala solo en la tarjeta segura de Muse: nunca en el chat.</p>
+            <div class="secret">
+              <code id="s-access-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn" id="s-reveal-key">Mostrar</button>
+              <button type="button" class="btn" id="s-copy-key">Copiar llave</button>
+            </div>
+          </li>
+          <li>
+            <h3>Muse verifica sola</h3>
+            <p class="muted small">Muse leerá el saldo y unos clientes de prueba. Lo verás abajo, en <strong>Actividad en Stripe</strong>.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Qué puede hacer -->
+      <section class="card card-methods" aria-labelledby="s-can-title">
+        <div class="card-head">
+          <h2 id="s-can-title">Qué puede hacer Muse</h2>
+          <span id="s-mode" class="mode-badge"></span>
+        </div>
+        <ul class="perm-guide small">
+          <li class="yes">Clientes, pagos, cobros, reembolsos, facturas, suscripciones, productos, precios, cupones, Checkout y Payment Links (te pedirá confirmación antes de cobrar, devolver o escribir a clientes)</li>
+          <li class="yes">Leer saldo, movimientos, payouts, disputas y eventos</li>
+          <li class="no" id="s-money-line">Payouts, transferencias y cambios de cuenta bancaria: bloqueados en el proxy</li>
+          <li class="no" id="s-access-line">Webhooks, enlaces públicos y enlaces de acceso: bloqueados (protegen lo que ya está conectado a Stripe)</li>
+        </ul>
+        <dl class="kv" id="s-security"></dl>
+      </section>
+
+      <!-- Permisos -->
+      <section class="card card-kkey" aria-labelledby="s-perm-title">
+        <h2 id="s-perm-title">Permisos de la clave de Stripe</h2>
+        <p class="muted small">Lo que la clave puede leer, probado en vivo. Se cambian en Stripe → Developers → API keys, sin tocar Vercel.</p>
+        <ul id="s-perms" class="perm-list perm-list-1"></ul>
+        <details class="rotate">
+          <summary>Cambiar la clave de Stripe</summary>
+          <ol class="rotate-steps small">
+            <li>En Stripe, crea una clave restringida nueva (o usa <strong>Roll key</strong>) y revoca la anterior.</li>
+            <li>En Vercel, reemplaza <code>STRIPE_SECRET_KEY</code> y haz <strong>Redeploy</strong>.</li>
+            <li>La llave de Muse cambia sola: cópiala otra vez aquí y dásela a Muse en su tarjeta segura.</li>
+          </ol>
+        </details>
+      </section>
+
+      <!-- Actividad -->
+      <section class="card card-wide" aria-labelledby="s-activity-title">
+        <div class="card-head">
+          <h2 id="s-activity-title">Actividad en Stripe</h2>
+          <span class="muted small" id="s-activity-updated"></span>
+        </div>
+        <div class="counters" id="s-counters"></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Hora</th><th>Llamada</th><th class="num">Estado</th><th class="num" title="Tiempo hasta que Stripe empezó a responder">Respuesta Stripe</th><th class="num col-total" title="Tiempo total de la llamada">Total</th></tr></thead>
+            <tbody id="s-activity"></tbody>
+          </table>
+        </div>
+        <p class="muted small">Solo se guarda el tipo de llamada, la ruta (sin la query), el resultado y el tiempo. Nunca datos de clientes, importes ni claves.</p>
       </section>
     </main>
     <footer class="footer muted small" id="footer"></footer>

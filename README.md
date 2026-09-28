@@ -23,6 +23,9 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 - **GoHighLevel Agencia (opcional):** una API aparte, con el token de la
   **agencia** y su propia llave, para que Muse administre toda la agencia
   (subcuentas, usuarios, snapshots, SaaS…). Ver [GoHighLevel Agencia](#gohighlevel-agencia).
+- **Stripe (opcional):** otra API aparte, con su propia llave, para que Muse
+  trabaje con la cuenta de Stripe; bloquea por defecto lo que saca dinero o da
+  accesos permanentes. Ver [Stripe](#stripe).
 
 ---
 
@@ -36,6 +39,7 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 | `TRACE /ghl/*`, `TRACE /mcp/` | `X-Proxy-Key` | `405 {"error": "method_not_allowed"}`. `TRACE` devuelve los headers recibidos, así que reenviarlo podría exponer el token de GHL inyectado. |
 | `POST /api/kraken`, `GET /api/kraken?health=1` | llave de Kraken | Ver [Kraken](#kraken). Independiente de todo lo de GHL. |
 | `ALL /agency/*` | llave de agencia | Como `/ghl/*`, pero con el token de la **agencia**. Ver [GoHighLevel Agencia](#gohighlevel-agencia). |
+| `GET/POST/DELETE /stripe/v1/*`, `/stripe/v2/*` | llave de Stripe | Stripe con la clave del servidor. Ver [Stripe](#stripe). |
 | `/admin`, `GET /` | PIN (sesión) | Panel del operador. Solo existe si `ADMIN_PIN` está definido; `GET /` redirige a `/admin`. Sin `ADMIN_PIN`, estas rutas responden `401` como cualquier otra. |
 | cualquier otra | `X-Proxy-Key` | `404 {"error": "not_found"}` |
 
@@ -407,9 +411,9 @@ location / {
 No hay usuario ni contraseña. Se activa definiendo `ADMIN_PIN` en la
 plataforma (por ejemplo, 8 dígitos que solo tú conozcas).
 
-Arriba hay un selector con tres pestañas: **GHL Eximia** (esta sección),
-**GHL Agencia** (ver [GoHighLevel Agencia](#gohighlevel-agencia)) y
-**Kraken** (ver [Kraken](#kraken)).
+Arriba hay un selector con cuatro pestañas: **GHL Eximia** (esta sección),
+**GHL Agencia** (ver [GoHighLevel Agencia](#gohighlevel-agencia)),
+**Kraken** (ver [Kraken](#kraken)) y **Stripe** (ver [Stripe](#stripe)).
 
 Qué muestra:
 
@@ -917,6 +921,100 @@ El panel (`/admin` → pestaña **GHL Agencia**) muestra estos mismos pasos.
 El límite de llamadas es el mismo número que el de Eximia (`RATE_LIMIT_MAX`
 cada `RATE_LIMIT_WINDOW_MS`), pero con su propio contador.
 
+## Stripe
+
+Una API aparte para que Muse trabaje con la cuenta de **Stripe**. El proxy
+guarda la clave de Stripe y le da a Muse **otra llave**.
+
+```
+Muse --(X-Proxy-Key: llave de Stripe)--> /stripe/v1/* --(Bearer <clave de Stripe>)--> api.stripe.com/v1/*
+```
+
+- `/stripe/<ruta>` va a `https://api.stripe.com/<ruta>` (solo `/v1/...` y
+  `/v2/...`; métodos GET, POST y DELETE). La respuesta de Stripe vuelve tal cual.
+- Otra llave, otro límite y otra actividad en el panel. Las llaves de GHL y
+  Kraken no abren Stripe, y la de Stripe no abre nada más.
+- Sin la clave, `/stripe` responde `503 stripe_not_configured` y lo demás
+  sigue igual.
+
+### Fiabilidad
+
+- **Idempotency-Key en cada escritura.** Cada POST (y los DELETE de /v2) lleva
+  un `Idempotency-Key`: el de Muse o uno que pone el proxy y devuelve en
+  `X-Proxy-Idempotency-Key`. Con la misma clave y el mismo cuerpo, Stripe nunca
+  repite la acción: devuelve el primer resultado (`Idempotent-Replayed: true`).
+- **Reintentos seguros, con las reglas de Stripe:** conexión perdida,
+  `Stripe-Should-Retry: true`, 409, 429 sin `Stripe-Rate-Limited-Reason`
+  (bloqueo interno) y 5xx (salvo `Stripe-Should-Retry: false`), hasta 2
+  reintentos con espera de 0,5 s a 5 s, dentro de 25 s. Los límites de
+  velocidad reales (429 con motivo) vuelven a Muse. `X-Proxy-Attempts` dice
+  cuántos intentos hubo.
+- **Qué pasó exactamente:** cada error de Stripe vuelve tal cual más un objeto
+  `proxy` en español (`summary`, `executed` yes/no/unknown, `safe_to_retry`,
+  `next`, `idempotency_key`). Las respuestas propias del proxy usan el mismo
+  formato con `error.type = "proxy_error"`.
+- **JSON aceptado en /v1:** Stripe espera `x-www-form-urlencoded`; si Muse
+  manda JSON, el proxy lo convierte como las librerías oficiales
+  (`items[0][price]=…`) y lo indica en `X-Proxy-Converted`.
+- **Versión fija:** si Muse no manda `Stripe-Version`, el proxy manda
+  `2026-08-26.dahlia` (o `STRIPE_API_VERSION`).
+
+### Qué está bloqueado por defecto
+
+Se comparan método y ruta tal como Stripe la enruta (cada segmento
+decodificado una vez, en minúsculas). Una ruta ambigua (`%2F`, `//`, `.`/`..`,
+`;`, `\`, `#`) se rechaza con 400.
+
+- **Dinero hacia fuera** (se permite con `STRIPE_ALLOW_MONEY_OUT=true`):
+  payouts, reversiones de payouts, transferencias y sus reversiones,
+  devoluciones de comisiones de aplicación, cuentas bancarias de destino
+  (`external_accounts`, `bank_accounts`, `/v2/core/vault`), `balance_settings`,
+  borrar o rechazar cuentas conectadas, Treasury saliente, tarjetas de Issuing,
+  Climate, movimientos de dinero de `/v2/money_management`, y crear o cambiar
+  cuentas conectadas con `external_account`, `bank_account` o
+  `settings[payouts]` (también en la query o en JSON).
+- **Accesos permanentes** (se permite con `STRIPE_ALLOW_ACCESS_GRANTS=true`):
+  webhooks y destinos de eventos (crearlos, cambiarlos o borrarlos podría
+  romper integraciones ya conectadas o sacar datos), enlaces públicos a
+  archivos, enlaces de alta y de acceso a cuentas, sesiones de cuenta, claves
+  efímeras, reenvío de datos de tarjeta, secretos de apps, gestión de claves y
+  operaciones masivas.
+
+Todo lo demás pasa: clientes, pagos, cobros, reembolsos, facturas,
+suscripciones, productos, precios, cupones, Checkout, Payment Links, disputas,
+lecturas de saldo, payouts y eventos… El mensaje para Muse le pide confirmar
+contigo cada acción que cobre, devuelva dinero o llegue a un cliente.
+
+### Configurarlo (unos 5 minutos)
+
+1. **Crea una clave restringida solo para Muse:** Stripe → **Developers → API
+   keys → Create restricted key**, nombre «Muse», recursos en **Write** (o Read
+   donde Muse solo deba leer). Si Stripe ofrece «Authorizing agent access to
+   your account», elígelo: añade aprobaciones de Stripe. Una clave aparte se
+   revoca sin afectar a lo que ya usa la clave principal. Sin restricción por
+   IP (Vercel no tiene IP fija).
+2. **Vercel:** `STRIPE_SECRET_KEY` en **Production**, marcada como
+   **Sensitive**, y **Redeploy**.
+3. **Panel → Stripe → Verificar ahora:** clave válida y modo (live/test),
+   cuenta, permisos de lectura (14 familias), conexión de Muse, llaves
+   separadas y que los bloqueos respondan (con rutas que no cambian nada).
+4. **Conectar Muse:** **Copiar mensaje para Muse** y, cuando pida la llave de
+   Stripe, **Copiar llave** → su tarjeta segura.
+
+### Variables de entorno de Stripe
+
+| Variable | Obligatoria | Qué es |
+|---|---|---|
+| `STRIPE_SECRET_KEY` | sí | Clave restringida (`rk_live_…`/`rk_test_…`) o secreta (`sk_…`). El panel avisa si es la secreta completa. |
+| `STRIPE_PROXY_KEY` | no | Llave de Muse para Stripe (32+ caracteres). Vacía = se deriva de la clave (HKDF-SHA256, de un solo sentido). |
+| `STRIPE_PUBLIC_HOST` | no | Dirección que el panel da a Muse (p. ej. `stripe-proxy-muse.vercel.app`). |
+| `STRIPE_API_VERSION` | no | Versión de Stripe por defecto. Vacía = `2026-08-26.dahlia`. |
+| `STRIPE_ALLOW_MONEY_OUT` | no | Solo `true` permite payouts, transferencias y cambios de cuenta bancaria. |
+| `STRIPE_ALLOW_ACCESS_GRANTS` | no | Solo `true` permite webhooks, enlaces públicos y enlaces de acceso. |
+
+Límites no cubiertos: la subida de archivos (`/v1/files`) y los PDF de
+presupuestos van a `files.stripe.com`, que esta API no toca.
+
 ## Estructura
 
 ```
@@ -933,8 +1031,10 @@ src/
   admin/         frontend del panel (HTML/CSS/JS sin dependencias)
   kraken/        Kraken: config, lista de métodos, firma, cliente, /api/kraken, panel
   agency/        GHL Agencia: config, /agency (token de agencia, bloqueo de borrado), panel
+  stripe/        Stripe: config, bloqueos, reintentos seguros, /stripe, panel
+  canonical-path.js  ruta normalizada para los bloqueos de /agency
   logger.js      logs JSON: method, path, status, ms
-test/            node:test + GHL (subcuenta y agencia) y Kraken simulados
+test/            node:test + GHL (subcuenta y agencia), Kraken y Stripe simulados
 test-sign.js     prueba de la firma de Kraken contra el ejemplo oficial (PASS/FAIL)
 scripts/
   smoke-test.sh        aceptación contra el deploy

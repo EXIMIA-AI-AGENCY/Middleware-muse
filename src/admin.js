@@ -389,6 +389,7 @@ function createAdminRouter({
   checkMarker,
   kraken = null,
   agency = null,
+  stripe = null,
   lockout = createLockout(),
   sessions = createSessions({ secret: `${config.proxyKey}\u0000${config.adminPin}` }),
 }) {
@@ -530,6 +531,9 @@ function createAdminRouter({
   }
   if (agency) {
     agency.mountAdmin(router, { requireSession, sameOriginJson, publicHost, getSelfUrl, call: createClient(), ghlCheckMarker: checkMarker });
+  }
+  if (stripe) {
+    stripe.mountAdmin(router, { requireSession, sameOriginJson, publicHost, getSelfUrl, call: createClient(), ghlCheckMarker: checkMarker });
   }
 
   router.use('/api', (req, res) => sendJson(res, 404, { error: 'not_found' }));
