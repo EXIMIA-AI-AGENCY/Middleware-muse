@@ -7,32 +7,73 @@ const { createForwarder } = require('../proxy');
 
 const sha256 = (value) => crypto.createHash('sha256').update(value, 'utf8').digest();
 const same = (value, expectedHash) => typeof value === 'string' && value.length > 0 && crypto.timingSafeEqual(sha256(value), expectedHash);
+// SaaS routes answer only to this Version (GHL docs); every other agency route uses the default.
+const SAAS_VERSION = '2021-04-15';
+// Headers some servers read as "treat this POST as another method": never relayed.
+const METHOD_OVERRIDE = ['x-http-method-override', 'x-http-method', 'x-method-override'];
 
 /**
- * The agency API, mounted at /agency. Same passthrough as the Eximia proxy (/ghl, /mcp) but
- * with the AGENCY token and its own key, limit and activity:
- *   ALL  /agency/*      -> https://services.leadconnectorhq.com/*      (X-Proxy-Key: agency key)
- *   POST /agency/mcp/   -> https://services.leadconnectorhq.com/mcp/   (X-Proxy-Key: agency key)
- * The Eximia key does not open it, and the agency key does not open /ghl or /mcp.
+ * The path as GHL's edge will see it: percent-decoded, dot segments resolved, backslashes
+ * as slashes, repeated slashes collapsed, lower case, no trailing slash. Guards compare
+ * against this so an encoded or dotted path cannot slip past them.
  */
-function createAgencyRouter({ config, ghlConfig, logger, metrics, limiter, extraRoutes }) {
+function canonicalPath(url) {
+  let path = String(url).split('?', 1)[0];
+  for (let i = 0; ; i += 1) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      return null; // malformed encoding: the caller refuses it
+    }
+    if (decoded === path) break;
+    if (i === 4) return null; // encoded over and over: refused rather than guessed
+    path = decoded;
+  }
+  // By hand, not with the URL parser: "//host/..." would be read as a host, not a path.
+  const segments = [];
+  for (const segment of path.replace(/\\/g, '/').split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  return `/${segments.join('/')}`.toLowerCase();
+}
+
+const isSubAccountDelete = (method, path) => method === 'DELETE' && /^\/locations\/[^/]+$/.test(path);
+
+/**
+ * The agency API, mounted at /agency: the same REST passthrough as the Eximia proxy (/ghl),
+ * but with the AGENCY token and its own key, limit and activity.
+ *   ALL /agency/*  ->  https://services.leadconnectorhq.com/*   (X-Proxy-Key: agency key)
+ * The Eximia key does not open it, and the agency key does not open /ghl or /mcp.
+ *
+ * What GHL lets an agency token do (sub-accounts, users, snapshots, SaaS, company, menus) is
+ * GHL's decision; the proxy passes everything through, except deleting sub-accounts, which
+ * cannot be undone and stays off unless GHL_AGENCY_ALLOW_DELETE is exactly "true".
+ */
+function createAgencyRouter({ config, ghlConfig, logger, metrics, limiter }) {
   const router = express.Router();
   const expectedKey = config.enabled ? sha256(config.accessKey) : null;
   const expectedMarker = config.enabled ? sha256(config.checkMarker) : null;
-  // The forwarder reads the token, location and defaults from its config.
+  // No default locationId: agency calls name their sub-account (or company) themselves.
   const upstream = config.enabled ? { ...ghlConfig, ghlToken: config.token, ghlLocationId: null } : null;
+  const forward = upstream ? createForwarder(upstream, logger, { kind: 'rest', pathPrefix: '' }) : null;
 
   router.use((req, res, next) => {
     // This API has its own activity in the panel, apart from Eximia's.
     res.locals.metrics = metrics;
-    // Only the agency panel marker counts as a panel test here (not the Eximia one).
-    res.locals.check = false;
-    if (!config.enabled) return sendJson(res, 503, { error: 'agency_not_configured', message: 'The agency API is not configured on the server (GHL_AGENCY_TOKEN).' });
+    if (!config.enabled) {
+      res.locals.check = false;
+      return sendJson(res, 503, { error: 'agency_not_configured', message: 'The agency API is not configured on the server yet (GHL_AGENCY_TOKEN).' });
+    }
+    // The panel's marked test calls (marker derived from the agency token; the Eximia marker is
+    // ignored here) neither use Muse's budget nor show up as Muse's activity. The key is still required.
+    res.locals.check = same(req.headers['x-agency-check'], expectedMarker);
     if (!same(req.headers['x-proxy-key'], expectedKey)) {
       res.locals.rejectedKey = true;
       return sendJson(res, 401, { error: 'unauthorized' });
     }
-    res.locals.check = same(req.headers['x-agency-check'], expectedMarker);
     if (!res.locals.check) {
       const { allowed, retryAfterMs } = limiter.hit('agency-key');
       if (!allowed) {
@@ -43,12 +84,22 @@ function createAgencyRouter({ config, ghlConfig, logger, metrics, limiter, extra
     return next();
   });
 
-  if (upstream) {
-    if (extraRoutes) extraRoutes(router, upstream);
-    router.use('/mcp', createForwarder(upstream, logger, { kind: 'mcp', pathPrefix: '/mcp' }));
-    router.use(createForwarder(upstream, logger, { kind: 'rest', pathPrefix: '' }));
-  }
+  router.use((req, res, next) => {
+    const path = canonicalPath(req.url);
+    if (path === null) return sendJson(res, 400, { error: 'bad_request', message: 'The path has invalid percent-encoding.' });
+    for (const name of METHOD_OVERRIDE) delete req.headers[name];
+    if (isSubAccountDelete(req.method, path) && !config.allowDelete) {
+      res.locals.blocked = true;
+      logger.warn({ msg: 'agency_delete_blocked' });
+      return sendJson(res, 403, {
+        error: 'blocked_by_proxy',
+        message: 'Deleting a sub-account cannot be undone, so the proxy does not allow it. Nothing was sent to GoHighLevel. Tell the user: they can delete it in GoHighLevel themselves, or the owner can allow it on the proxy with GHL_AGENCY_ALLOW_DELETE=true.',
+      });
+    }
+    if (!req.headers.version && /^\/saas(-api)?\//.test(path)) req.headers.version = SAAS_VERSION;
+    return forward(req, res, next);
+  });
   return router;
 }
 
-module.exports = { createAgencyRouter };
+module.exports = { createAgencyRouter, canonicalPath, SAAS_VERSION };

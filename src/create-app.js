@@ -16,12 +16,13 @@ const { createRateLimiter, rateLimitByKey } = require('./rate-limit');
  *   ALL  /ghl/*   -> https://services.leadconnectorhq.com/*    (X-Proxy-Key)
  *   ALL  /mcp/    -> https://services.leadconnectorhq.com/mcp/ (X-Proxy-Key)
  *   /api/kraken   -> signed Kraken calls (its own key; see src/kraken; only when passed in)
+ *   ALL  /agency/* -> GHL with the AGENCY token (its own key; see src/agency; only when passed in)
  *   /admin        -> operator dashboard (ADMIN_PIN session; only when ADMIN_PIN is set)
  *
  * `app.locals.selfUrl` (set by the caller once listening) lets the dashboard test the
  * proxy the same way Muse uses it.
  */
-function createApp(config, logger, { adminOptions = {}, kraken = null } = {}) {
+function createApp(config, logger, { adminOptions = {}, kraken = null, agency = null } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.disable('etag');
@@ -52,11 +53,12 @@ function createApp(config, logger, { adminOptions = {}, kraken = null } = {}) {
     sendJson(res, 200, { ok: true, version: config.version });
   });
 
-  // Kraken has its own key and limits, so it sits before the GHL key check below.
+  // Kraken and the agency API have their own keys and limits, so they sit before the GHL key check below.
   if (kraken) app.use('/api/kraken', kraken.router);
+  if (agency) app.use('/agency', agency.router);
 
   if (config.adminPin) {
-    app.use('/admin', createAdminRouter({ config, logger, metrics, checkMarker, kraken, getSelfUrl: () => app.locals.selfUrl, ...adminOptions }));
+    app.use('/admin', createAdminRouter({ config, logger, metrics, checkMarker, kraken, agency, getSelfUrl: () => app.locals.selfUrl, ...adminOptions }));
     app.get('/', (req, res) => res.redirect(302, '/admin'));
   }
 

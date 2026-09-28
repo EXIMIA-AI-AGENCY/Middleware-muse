@@ -182,6 +182,8 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .card-head h2 { margin-bottom: 0; }
+.card-methods .card-head { flex-wrap: wrap; row-gap: 6px; }
+.card-methods .card-head h2 { flex: 1 0 auto; }
 
 /* Status */
 .status-head { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; }
@@ -323,9 +325,9 @@ code, pre { font-family: var(--mono); font-size: 13px; }
   .perm-list { grid-template-columns: 1fr; }
 }
 
-/* Switch GoHighLevel | Kraken */
+/* Switch GHL Eximia | GHL Agencia | Kraken */
 .switch {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
   padding: 6px; margin: 0 0 16px;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 16px;
 }
@@ -344,6 +346,11 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .switch-dot[data-state="ok"] { background: var(--ok); }
 .switch-dot[data-state="warn"], .switch-dot[data-state="setup"] { background: var(--warn); }
 .switch-dot[data-state="fail"] { background: var(--fail); }
+@media (max-width: 520px) {
+  .switch { gap: 4px; padding: 4px; }
+  .switch-btn { font-size: 14px; gap: 6px; padding: 6px 4px; min-height: 52px; }
+  .switch-dot { width: 8px; height: 8px; }
+}
 
 /* Kraken */
 .mode-badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 650; white-space: nowrap; }
@@ -359,6 +366,11 @@ code, pre { font-family: var(--mono); font-size: 13px; }
 .perm[data-state="ok"] .check-icon { background: var(--ok-soft); color: var(--ok); }
 .perm[data-state="warn"] .check-icon { background: var(--warn-soft); color: var(--warn); }
 .perm[data-state="fail"] .check-icon { background: var(--fail-soft); color: var(--fail); }
+.perm[data-state="info"] .check-icon { background: var(--surface); color: var(--muted); }
+.card-methods .perm-guide { margin-bottom: 4px; }
+.mode-badge[data-mode="blocked"] { background: var(--ok-soft); color: var(--ok); }
+.mode-badge[data-mode="allowed"] { background: var(--warn-soft); color: var(--warn); }
+#a-scopes { margin: 8px 0; }
 .perm-guide { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .perm-guide li { padding-left: 24px; position: relative; }
 .perm-guide li::before { position: absolute; left: 0; font-weight: 700; }

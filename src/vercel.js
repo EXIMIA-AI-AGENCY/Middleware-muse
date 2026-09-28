@@ -28,7 +28,18 @@ function loadKraken() {
   }
 }
 const kraken = loadKraken();
-const app = createApp(config, logger, { kraken });
+// Same rule for the GHL agency API: optional, isolated, never takes the rest down.
+function loadAgency() {
+  try {
+    const others = kraken && kraken.config.accessKey ? [kraken.config.accessKey] : [];
+    return require('./agency').tryCreateAgency({ env: process.env, ghlConfig: config, logger, others });
+  } catch (err) {
+    logger.error({ msg: 'ghl_agency_disabled', name: err && err.name });
+    return null;
+  }
+}
+const agency = loadAgency();
+const app = createApp(config, logger, { kraken, agency });
 // The dashboard tests the proxy through its public production URL, exactly like Muse.
 const productionHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
 if (productionHost) app.locals.selfUrl = `https://${productionHost}`;

@@ -16,6 +16,7 @@
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5m0 3.5v.01" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M20 12H8m0 0l5-5m-5 5l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><path d="M12 11v6m0-9.5v.01" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 10.5V8a3.5 3.5 0 017 0v2.5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
   </svg>
 
@@ -26,7 +27,7 @@
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 16h14M17 10l6 6-6 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <div>
           <h1>ghl-proxy</h1>
-          <p class="muted">GoHighLevel · Kraken ↔ Muse</p>
+          <p class="muted">GoHighLevel · Agencia · Kraken ↔ Muse</p>
         </div>
       </div>
       <label for="pin" class="pin-label"><svg class="icon"><use href="#i-lock"/></svg> Ingresa tu PIN</label>
@@ -60,7 +61,8 @@
 
     <!-- Switch -->
     <div class="switch" role="tablist" aria-label="Servicio">
-      <button type="button" role="tab" id="tab-ghl" class="switch-btn" data-view="ghl" aria-selected="true" aria-controls="view-ghl"><span class="switch-dot" aria-hidden="true"></span>GoHighLevel</button>
+      <button type="button" role="tab" id="tab-ghl" class="switch-btn" data-view="ghl" aria-selected="true" aria-controls="view-ghl"><span class="switch-dot" aria-hidden="true"></span>GHL Eximia</button>
+      <button type="button" role="tab" id="tab-agency" class="switch-btn" data-view="agency" aria-selected="false" aria-controls="view-agency" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>GHL Agencia</button>
       <button type="button" role="tab" id="tab-kraken" class="switch-btn" data-view="kraken" aria-selected="false" aria-controls="view-kraken" tabindex="-1"><span class="switch-dot" aria-hidden="true"></span>Kraken</button>
     </div>
 
@@ -172,6 +174,128 @@
           </table>
         </div>
         <p class="muted small">Solo se guarda el tipo de llamada, la ruta, el resultado y el tiempo. Nunca datos de tus contactos ni claves.</p>
+      </section>
+    </main>
+
+    <!-- GHL Agencia -->
+    <main class="grid" id="view-agency" role="tabpanel" aria-labelledby="tab-agency" hidden>
+      <!-- Estado -->
+      <section class="card card-status" aria-labelledby="a-status-title">
+        <div class="status-head">
+          <div id="a-status-badge" class="status-badge" data-state="pending" aria-hidden="true"><svg class="icon"><use href="#i-check"/></svg></div>
+          <div class="status-text">
+            <h2 id="a-status-title">Verificando…</h2>
+            <p id="a-status-sub" class="muted">Probando el token de la agencia, sus permisos y el proxy.</p>
+          </div>
+          <button id="a-run-checks" type="button" class="btn">Verificar ahora</button>
+        </div>
+        <ul id="a-checks" class="checklist" aria-live="polite"></ul>
+      </section>
+
+      <!-- Configurar -->
+      <section class="card card-wide card-setup" id="a-setup" aria-labelledby="a-setup-title" hidden>
+        <h2 id="a-setup-title">Configurar la API de agencia (una sola vez)</h2>
+        <ul id="a-problems" class="problems" hidden></ul>
+        <ol class="steps">
+          <li>
+            <h3>Crea una Private Integration en la AGENCIA</h3>
+            <p class="muted small">En GoHighLevel cambia a la vista de <strong>Agencia</strong> (no dentro de una subcuenta) → <strong>Settings → Private Integrations</strong> → <strong>Create new Integration</strong>. Ponle de nombre «Muse Agencia». Hace falta el plan Agency Pro.</p>
+            <p class="muted small">Marca <strong>todos</strong> los permisos que aparezcan, así Muse puede hacer todo lo que GoHighLevel permite a nivel agencia:</p>
+            <ul id="a-scopes" class="method-list"></ul>
+            <p class="muted small">GoHighLevel muestra el token (empieza por <code>pit-</code>) una sola vez: cópialo para el paso 2.</p>
+          </li>
+          <li>
+            <h3>Pégalo en Vercel (nunca en un chat)</h3>
+            <p class="muted small">Vercel → proyecto <strong>ghl-proxy-muse</strong> → <strong>Settings → Environment Variables</strong>. Añade una variable en <strong>Production</strong>, marcada como <strong>Sensitive</strong>:</p>
+            <dl class="kv kv-left">
+              <dt><code>GHL_AGENCY_TOKEN</code></dt><dd>el token de la agencia</dd>
+            </dl>
+          </li>
+          <li>
+            <h3>Haz Redeploy y vuelve aquí</h3>
+            <p class="muted small">Vercel → <strong>Deployments</strong> → el último → <strong>⋯ → Redeploy</strong>. Al terminar, pulsa <strong>Verificar ahora</strong>: el panel creará una <strong>llave nueva</strong> solo para esta API. GHL Eximia y Kraken no se tocan.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Conectar Muse -->
+      <section class="card card-wide card-connect" id="a-connect" aria-labelledby="a-connect-title" hidden>
+        <h2 id="a-connect-title">Conectar Muse a la agencia</h2>
+        <ol class="steps">
+          <li>
+            <h3>Copia este mensaje y pégalo en Muse</h3>
+            <p class="muted small">Tiene todo lo que Muse necesita: dirección, qué puede y qué no puede hacer, cómo verificar y las reglas. No contiene ningún secreto.</p>
+            <div class="actions">
+              <button type="button" class="btn btn-primary btn-wide" id="a-copy-muse">Copiar mensaje para Muse</button>
+            </div>
+            <details class="preview">
+              <summary>Ver el mensaje</summary>
+              <pre id="a-muse-message" class="code code-scroll" tabindex="0">—</pre>
+            </details>
+          </li>
+          <li>
+            <h3>Cuando Muse te pida la llave de la agencia, pégala en su tarjeta segura</h3>
+            <p class="muted small">Es una llave <strong>distinta</strong> de la de Eximia y de la de Kraken. Pégala solo en la tarjeta segura de Muse: nunca en el chat.</p>
+            <div class="secret">
+              <code id="a-access-key" class="code code-inline">••••••••••••••••••••••••••••••••</code>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn" id="a-reveal-key">Mostrar</button>
+              <button type="button" class="btn" id="a-copy-key">Copiar llave</button>
+            </div>
+          </li>
+          <li>
+            <h3>Muse verifica sola</h3>
+            <p class="muted small">Muse leerá la agencia y la lista de subcuentas. Lo verás abajo, en <strong>Actividad en la agencia</strong>.</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Qué puede hacer -->
+      <section class="card card-methods" aria-labelledby="a-can-title">
+        <div class="card-head">
+          <h2 id="a-can-title">Qué puede hacer Muse</h2>
+          <span id="a-mode" class="mode-badge"></span>
+        </div>
+        <ul class="perm-guide small">
+          <li class="yes">Subcuentas: buscar, ver, crear y modificar</li>
+          <li class="yes">Usuarios: buscar, crear, modificar y borrar</li>
+          <li class="yes">Snapshots, SaaS, datos de la agencia y menús</li>
+          <li class="no" id="a-delete-line">Borrar subcuentas: bloqueado en el proxy</li>
+          <li class="no">Datos dentro de las subcuentas (contactos, conversaciones…): GoHighLevel no lo permite con un token de agencia. Para Eximia, Muse usa la pestaña <strong>GHL Eximia</strong>.</li>
+        </ul>
+        <dl class="kv" id="a-security"></dl>
+      </section>
+
+      <!-- Permisos -->
+      <section class="card card-kkey" aria-labelledby="a-perm-title">
+        <h2 id="a-perm-title">Permisos del token de agencia</h2>
+        <p class="muted small">Lo que el token puede leer, probado en vivo. Se cambian en GHL → Agencia → Settings → Private Integrations, sin tocar Vercel.</p>
+        <ul id="a-perms" class="perm-list perm-list-1"></ul>
+        <details class="rotate">
+          <summary>Cambiar el token de la agencia</summary>
+          <ol class="rotate-steps small">
+            <li>En la Private Integration de la agencia, pulsa <strong>Rotate</strong> (o crea una nueva con los mismos permisos).</li>
+            <li>En Vercel, reemplaza <code>GHL_AGENCY_TOKEN</code> y haz <strong>Redeploy</strong>.</li>
+            <li>La llave de Muse cambia sola: cópiala otra vez aquí y dásela a Muse en su tarjeta segura.</li>
+          </ol>
+        </details>
+      </section>
+
+      <!-- Actividad -->
+      <section class="card card-wide" aria-labelledby="a-activity-title">
+        <div class="card-head">
+          <h2 id="a-activity-title">Actividad en la agencia</h2>
+          <span class="muted small" id="a-activity-updated"></span>
+        </div>
+        <div class="counters" id="a-counters"></div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Hora</th><th>Llamada</th><th class="num">Estado</th><th class="num" title="Tiempo hasta que GoHighLevel empezó a responder">Respuesta GHL</th><th class="num col-total" title="Tiempo total de la llamada">Total</th></tr></thead>
+            <tbody id="a-activity"></tbody>
+          </table>
+        </div>
+        <p class="muted small">Solo se guarda el tipo de llamada, la ruta, el resultado y el tiempo. Nunca datos ni claves.</p>
       </section>
     </main>
 

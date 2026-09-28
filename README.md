@@ -20,6 +20,9 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 - **Kraken (opcional):** el mismo servicio firma llamadas de solo lectura a la
   API privada de Kraken para Muse, con su propia llave. Si no se configura, no
   cambia nada de GoHighLevel. Ver [Kraken](#kraken).
+- **GoHighLevel Agencia (opcional):** una API aparte, con el token de la
+  **agencia** y su propia llave, para que Muse administre toda la agencia
+  (subcuentas, usuarios, snapshots, SaaS…). Ver [GoHighLevel Agencia](#gohighlevel-agencia).
 
 ---
 
@@ -32,6 +35,7 @@ Muse (skill gohighlevel) --(X-Proxy-Key)--> ghl-proxy --(Bearer <GHL token>)--> 
 | `POST /mcp/` | `X-Proxy-Key` | Reenvía el JSON-RPC a `https://services.leadconnectorhq.com/mcp/` (MCP streamable HTTP) y devuelve la respuesta en streaming (SSE). `/mcp` sin barra final funciona igual. Otros métodos (`GET`, `DELETE`…) también se reenvían y GHL decide la respuesta (hoy `405`/`404`). |
 | `TRACE /ghl/*`, `TRACE /mcp/` | `X-Proxy-Key` | `405 {"error": "method_not_allowed"}`. `TRACE` devuelve los headers recibidos, así que reenviarlo podría exponer el token de GHL inyectado. |
 | `POST /api/kraken`, `GET /api/kraken?health=1` | llave de Kraken | Ver [Kraken](#kraken). Independiente de todo lo de GHL. |
+| `ALL /agency/*` | llave de agencia | Como `/ghl/*`, pero con el token de la **agencia**. Ver [GoHighLevel Agencia](#gohighlevel-agencia). |
 | `/admin`, `GET /` | PIN (sesión) | Panel del operador. Solo existe si `ADMIN_PIN` está definido; `GET /` redirige a `/admin`. Sin `ADMIN_PIN`, estas rutas responden `401` como cualquier otra. |
 | cualquier otra | `X-Proxy-Key` | `404 {"error": "not_found"}` |
 
@@ -402,6 +406,10 @@ location / {
 `https://<host>/admin`: un panel pensado para el celular, protegido con PIN.
 No hay usuario ni contraseña. Se activa definiendo `ADMIN_PIN` en la
 plataforma (por ejemplo, 8 dígitos que solo tú conozcas).
+
+Arriba hay un selector con tres pestañas: **GHL Eximia** (esta sección),
+**GHL Agencia** (ver [GoHighLevel Agencia](#gohighlevel-agencia)) y
+**Kraken** (ver [Kraken](#kraken)).
 
 Qué muestra:
 
@@ -829,6 +837,84 @@ no hay nada extra que desplegar. Basta con añadir las variables de Kraken y
 hacer Redeploy. Sin Vercel (Docker/VPS), igual: las mismas variables en el
 `.env`.
 
+## GoHighLevel Agencia
+
+Una **segunda API de GoHighLevel**, separada de la de Eximia, para que Muse
+administre **toda la agencia**. Usa el token de una Private Integration creada
+en la **agencia** (no en una subcuenta) y le da a Muse **otra llave**.
+
+```
+Muse --(X-Proxy-Key: llave de agencia)--> /agency/* --(Bearer <token de agencia>)--> services.leadconnectorhq.com/*
+```
+
+- `/agency/<ruta>` funciona igual que `/ghl/<ruta>`: método, query, headers y
+  cuerpo pasan tal cual, y la respuesta de GHL vuelve tal cual.
+- Otra llave, otro límite y otra actividad en el panel. La llave de Eximia no
+  abre `/agency`, y la de agencia no abre `/ghl`, `/mcp` ni Kraken.
+- Sin el token de agencia, `/agency` responde `503 agency_not_configured` y
+  todo lo demás sigue exactamente igual.
+- No hay MCP en esta API (el MCP de GHL es por subcuenta): solo REST.
+
+### Qué puede y qué no puede hacer
+
+**Puede** todo lo que GoHighLevel permite a un token de agencia: buscar,
+ver, crear y modificar subcuentas (`/locations/…`), usuarios (`/users/…`),
+snapshots, SaaS (planes, suscripciones, pausar, rebilling), datos de la
+agencia (`/companies/{companyId}`), menús personalizados, contratos y
+documentos.
+
+**No puede** leer ni cambiar datos **dentro** de las subcuentas (contactos,
+conversaciones, oportunidades, calendarios, workflows…). Es un límite de
+GoHighLevel, no del proxy: esas rutas solo aceptan un token de subcuenta, y
+GHL responde `401 The token is not authorized for this scope` al de agencia.
+Para Eximia, Muse sigue usando `/ghl` y `/mcp`. Para datos dentro de otra
+subcuenta hace falta un token de esa subcuenta.
+
+**Borrar subcuentas** (`DELETE /locations/{id}`) está **bloqueado** en el
+proxy porque no se puede deshacer: responde `403 blocked_by_proxy` y no llega
+a GHL. El bloqueo compara la ruta ya normalizada (mayúsculas, `%xx`, `//`,
+`.`/`..`), así que no se salta escribiéndola de otra forma. Solo se permite si
+`GHL_AGENCY_ALLOW_DELETE=true`. Todo lo demás pasa; el mensaje para Muse le
+pide confirmar contigo cada cambio antes de hacerlo.
+
+**Version:** si Muse no envía `Version`, el proxy pone `2021-07-28`, y
+`2021-04-15` en `/saas/*` y `/saas-api/*` (lo que exige GHL). Muse puede
+enviar `Version: v3` para las rutas v3.
+
+### Configurarlo (unos 5 minutos, sin tocar código)
+
+El panel (`/admin` → pestaña **GHL Agencia**) muestra estos mismos pasos.
+
+1. **Crea una Private Integration en la agencia.** En GoHighLevel cambia a
+   la vista de **Agencia** → **Settings → Private Integrations** → **Create
+   new Integration**. Nombre: `Muse Agencia`. Marca **todos** los permisos
+   que aparezcan (`companies.readonly`, `locations.readonly/write`,
+   `users.readonly/write`, `snapshots.readonly/write`, `saas/*`,
+   `custom-menu-link.*`, …). Hace falta el plan **Agency Pro**. GHL muestra el
+   token (`pit-…`) una sola vez.
+2. **Pégalo en Vercel, nunca en un chat.** Proyecto `ghl-proxy-muse` →
+   **Settings → Environment Variables** → `GHL_AGENCY_TOKEN`, en
+   **Production** y marcada como **Sensitive**.
+3. **Redeploy** y, en el panel → **GHL Agencia** → **Verificar ahora**. El
+   panel lee el ID de la agencia a través de la subcuenta Eximia
+   (`GET /locations/{Eximia}` → `location.companyId`), prueba cada permiso
+   con una lectura y comprueba que las llaves están separadas.
+4. **Conectar Muse:** **Copiar mensaje para Muse** → pégalo en Muse; cuando
+   pida la llave de la agencia, **Copiar llave** → su tarjeta segura.
+
+### Variables de entorno de la agencia
+
+| Variable | Obligatoria | Qué es |
+|---|---|---|
+| `GHL_AGENCY_TOKEN` | sí | Token de la Private Integration de la **agencia**. Debe ser distinto de `GHL_TOKEN`. |
+| `GHL_AGENCY_PROXY_KEY` | no | Llave de Muse para la agencia (32+ caracteres). Vacía = se deriva del token (HKDF-SHA256, de un solo sentido). Debe ser distinta de las demás llaves, tokens y del PIN. |
+| `GHL_AGENCY_PUBLIC_HOST` | no | Dirección que el panel da a Muse para la agencia (p. ej. `ghl-agency-muse.vercel.app`). Vacía = la del panel. |
+| `GHL_COMPANY_ID` | no | ID de la agencia. Vacío = el panel lo lee solo. |
+| `GHL_AGENCY_ALLOW_DELETE` | no | Solo `true` permite borrar subcuentas. Vacío = bloqueado. |
+
+El límite de llamadas es el mismo número que el de Eximia (`RATE_LIMIT_MAX`
+cada `RATE_LIMIT_WINDOW_MS`), pero con su propio contador.
+
 ## Estructura
 
 ```
@@ -844,8 +930,9 @@ src/
   admin.js       panel /admin: PIN, sesión, verificaciones en vivo
   admin/         frontend del panel (HTML/CSS/JS sin dependencias)
   kraken/        Kraken: config, lista de métodos, firma, cliente, /api/kraken, panel
+  agency/        GHL Agencia: config, /agency (token de agencia, bloqueo de borrado), panel
   logger.js      logs JSON: method, path, status, ms
-test/            node:test + GHL y Kraken simulados
+test/            node:test + GHL (subcuenta y agencia) y Kraken simulados
 test-sign.js     prueba de la firma de Kraken contra el ejemplo oficial (PASS/FAIL)
 scripts/
   smoke-test.sh        aceptación contra el deploy

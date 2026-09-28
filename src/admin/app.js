@@ -2,8 +2,8 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const ICON = { ok: 'i-check', warn: 'i-warn', fail: 'i-x', pending: 'i-check', offline: 'i-x' };
-  const STATE_WORD = { ok: 'Correcto', warn: 'Aviso', fail: 'Error' };
+  const ICON = { ok: 'i-check', warn: 'i-warn', fail: 'i-x', pending: 'i-check', offline: 'i-x', info: 'i-info' };
+  const STATE_WORD = { ok: 'Correcto', warn: 'Aviso', fail: 'Error', info: 'Información' };
   const REFRESH_MS = 15000;
   const KEY_VISIBLE_MS = 60000;
   const MASK = '••••••••••••••••••••••••••••••••';
@@ -15,10 +15,14 @@
   let lastOverviewOk = null; // Date of the last successful overview
   let offlineSince = null;
   let submitting = false;
-  let view = 'ghl'; // 'ghl' | 'kraken'
+  const VIEWS = ['ghl', 'agency', 'kraken'];
+  let view = 'ghl'; // one of VIEWS
   let lastKrakenChecks = null;
   let krakenStarted = false; // first visit to the Kraken tab loads it
   let krakenTimer = null;
+  let lastAgencyChecks = null;
+  let agencyStarted = false; // first visit to the agency tab loads it
+  let agencyTimer = null;
 
   // ---------- helpers ----------
 
@@ -429,7 +433,8 @@
   function hideKey() {
     clearTimeout(keyTimer);
     clearTimeout(krakenTimer);
-    for (const [nodeId, buttonId] of [['proxy-key', 'reveal-key'], ['k-access-key', 'k-reveal-key']]) {
+    clearTimeout(agencyTimer);
+    for (const [nodeId, buttonId] of [['proxy-key', 'reveal-key'], ['k-access-key', 'k-reveal-key'], ['a-access-key', 'a-reveal-key']]) {
       $(nodeId).textContent = MASK;
       $(nodeId).classList.remove('is-revealed');
       $(buttonId).textContent = 'Mostrar';
@@ -523,18 +528,19 @@
   // ---------- switch ----------
 
   function savedView() {
-    if (location.hash === '#kraken') return 'kraken';
-    if (location.hash === '#ghl') return 'ghl';
+    const fromHash = location.hash.slice(1);
+    if (VIEWS.includes(fromHash)) return fromHash;
     try {
-      return localStorage.getItem('panel-view') === 'kraken' ? 'kraken' : 'ghl';
+      const stored = localStorage.getItem('panel-view');
+      return VIEWS.includes(stored) ? stored : 'ghl';
     } catch {
       return 'ghl';
     }
   }
 
   function setView(next) {
-    view = next === 'kraken' ? 'kraken' : 'ghl';
-    for (const name of ['ghl', 'kraken']) {
+    view = VIEWS.includes(next) ? next : 'ghl';
+    for (const name of VIEWS) {
       const active = name === view;
       $(`view-${name}`).hidden = !active;
       $(`tab-${name}`).setAttribute('aria-selected', String(active));
@@ -551,6 +557,12 @@
         runKrakenChecks();
       }
       refreshKraken();
+    } else if (view === 'agency') {
+      if (!agencyStarted) {
+        agencyStarted = true;
+        runAgencyChecks();
+      }
+      refreshAgency();
     } else {
       refresh();
     }
@@ -718,10 +730,11 @@
   }
 
   function wireKraken() {
-    for (const name of ['ghl', 'kraken']) $(`tab-${name}`).addEventListener('click', () => setView(name));
+    for (const name of VIEWS) $(`tab-${name}`).addEventListener('click', () => setView(name));
     $('tab-ghl').parentElement.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-      setView(view === 'ghl' ? 'kraken' : 'ghl');
+      const step = event.key === 'ArrowRight' ? 1 : VIEWS.length - 1;
+      setView(VIEWS[(VIEWS.indexOf(view) + step) % VIEWS.length]);
       $(`tab-${view}`).focus();
     });
     $('k-run-checks').addEventListener('click', runKrakenChecks);
@@ -749,6 +762,190 @@
       copySecret(fetchKrakenKey, (key) => {
         showKrakenKey(key);
         selectNode($('k-access-key'));
+        toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
+      }),
+    );
+  }
+
+  // ---------- GHL Agencia ----------
+
+  const A_TITLES = {
+    ok: 'La API de agencia funciona',
+    warn: 'La API de agencia funciona, con avisos',
+    fail: 'La API de agencia tiene un problema',
+    setup: 'Falta configurar la API de agencia',
+    missing: 'La API de agencia no está disponible',
+  };
+  const A_SUBS = {
+    ok: 'El token de la agencia, sus permisos y el proxy responden bien. Muse puede usarla.',
+    warn: 'Lo esencial funciona. Revisa los avisos de abajo.',
+    fail: 'Revisa el punto en rojo. Muse no podrá usar la API de agencia hasta corregirlo.',
+    setup: 'Sigue los 3 pasos de abajo (unos 5 minutos). GHL Eximia y Kraken siguen funcionando igual.',
+    missing: 'Este servidor todavía no tiene la parte de agencia.',
+  };
+
+  function renderAgencyStatus(state, when) {
+    const badge = $('a-status-badge');
+    const iconState = state === 'setup' || state === 'missing' ? 'warn' : state;
+    badge.dataset.state = iconState;
+    badge.replaceChildren(icon(ICON[iconState] || ICON.warn));
+    $('tab-agency').querySelector('.switch-dot').dataset.state = state === 'missing' ? '' : state;
+    $('a-status-title').textContent = A_TITLES[state];
+    $('a-status-sub').textContent = `${A_SUBS[state]}${when ? ` Verificado ${ago(when)}.` : ''}`;
+  }
+
+  function renderAgencyChecks(result) {
+    lastAgencyChecks = result;
+    renderAgencyStatus(result.overall, new Date(result.ranAt));
+    $('a-checks').replaceChildren(
+      ...result.checks.map((c) =>
+        el(
+          'li',
+          { class: 'check', 'data-state': c.status },
+          stateIcon(c.status),
+          el('div', {}, el('div', { class: 'check-label', text: c.label }), el('div', { class: 'check-detail', text: c.detail })),
+          el('span', { class: 'check-ms', text: c.ms === null ? '' : fmtMs(c.ms) }),
+        ),
+      ),
+    );
+    $('a-perms').replaceChildren(
+      ...(result.permissions.length
+        ? result.permissions.map((p) => permItem({ ...p, detail: p.scope ? `${p.detail} · ${p.scope}` : p.detail }))
+        : [el('li', { class: 'perm-empty muted small', text: 'Aparecerán cuando el token esté puesto y verificado.' })]),
+    );
+  }
+
+  async function runAgencyChecks() {
+    const button = $('a-run-checks');
+    button.disabled = true;
+    button.textContent = 'Verificando…';
+    $('a-status-badge').dataset.state = 'pending';
+    try {
+      const { status, data } = await api('/agency/checks', { method: 'POST' });
+      if (status === 200 && data) renderAgencyChecks(data);
+      else if (status === 404) renderAgencyStatus('missing');
+      else toast('No se pudo verificar la API de agencia. Intenta de nuevo.', { error: true });
+    } catch (err) {
+      if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Verificar ahora';
+      if (!lastAgencyChecks && $('a-status-badge').dataset.state === 'pending') $('a-status-badge').dataset.state = 'warn';
+      refreshAgency();
+    }
+  }
+
+  function renderAgencyOverview(o) {
+    $('a-setup').hidden = o.configured;
+    $('a-connect').hidden = !o.configured;
+    $('a-problems').hidden = !(o.started && o.problems.length);
+    $('a-problems').replaceChildren(...o.problems.map((p) => el('li', { text: p })));
+    $('a-scopes').replaceChildren(...o.scopes.map((scope) => el('li', { text: scope })));
+    if (o.configured) $('a-muse-message').textContent = o.museMessage;
+
+    const mode = $('a-mode');
+    mode.dataset.mode = o.allowDelete ? 'allowed' : 'blocked';
+    mode.textContent = o.allowDelete ? 'Todo, incluido borrar' : 'Todo, menos borrar subcuentas';
+    const line = $('a-delete-line');
+    line.className = o.allowDelete ? 'yes' : 'no';
+    line.textContent = o.allowDelete ? 'Borrar subcuentas: PERMITIDO (no se puede deshacer)' : 'Borrar subcuentas: bloqueado en el proxy (no se puede deshacer)';
+
+    const company = lastAgencyChecks && lastAgencyChecks.company;
+    const agencyName = company && company.name ? `${company.name}${typeof company.locationCount === 'number' ? ` · ${fmtNum(company.locationCount)} subcuentas` : ''}` : null;
+    $('a-security').replaceChildren(
+      el('dt', { text: 'Agencia' }),
+      el('dd', { text: agencyName || (/^PENDIENTE/.test(o.connection.company_id) ? '—' : o.connection.company_id) }),
+      el('dt', { text: 'Llave de Muse' }),
+      el('dd', { text: o.key ? `${o.key.length} caracteres (${o.key.source === 'env' ? 'GHL_AGENCY_PROXY_KEY' : 'hecha con el token de la agencia'})` : '—' }),
+      el('dt', { text: 'Token de la agencia' }),
+      el('dd', { text: o.key ? `${o.key.tokenHint} (nunca sale del servidor)` : 'Sin poner' }),
+      el('dt', { text: 'Límite de llamadas' }),
+      el('dd', { text: `${o.rateLimit.max} cada ${o.rateLimit.windowSeconds} s` }),
+      el('dt', { text: 'Dirección' }),
+      el('dd', { text: o.connection.agency_host }),
+    );
+
+    const m = o.metrics;
+    const chips = [
+      ['Llamadas de Muse', m.calls, ''],
+      ['Bloqueadas por el proxy', m.blocked, m.blocked ? 'warn' : ''],
+      ['Llave incorrecta', m.rejectedKey, m.rejectedKey ? 'warn' : ''],
+      ['Frenadas por el límite', m.rateLimited, m.rateLimited ? 'warn' : ''],
+      ['GHL negó permiso', m.ghlDenied, m.ghlDenied ? 'warn' : ''],
+      ['Sin respuesta de GHL', m.upstreamErrors, m.upstreamErrors ? 'fail' : ''],
+      ['Canceladas por Muse', m.cancelled, m.cancelled ? 'warn' : ''],
+    ];
+    $('a-counters').replaceChildren(...chips.map(([label, value, tone]) => el('span', { class: `chip ${tone}` }, el('strong', { text: fmtNum(value) }), label)));
+    $('a-activity').replaceChildren(
+      ...(m.recent.length
+        ? m.recent.map((r) =>
+            el(
+              'tr',
+              {},
+              el('td', { class: 'time', text: fmtTime(r.at) }),
+              el('td', { class: 'path', text: `${r.method} ${r.path}` }),
+              el('td', { class: 'num' }, el('span', { class: `status-pill s${String(r.status)[0]}`, text: String(r.status) })),
+              el('td', { class: 'num', text: fmtMs(r.ghlMs) }),
+              el('td', { class: 'num col-total', text: fmtMs(r.totalMs) }),
+            ),
+          )
+        : [el('tr', {}, el('td', { class: 'empty', colspan: 5, text: 'Todavía no hay llamadas de Muse a la agencia.' }))]),
+    );
+    $('a-activity-updated').textContent = `Actualizado ${fmtTime(new Date())}`;
+    if (!lastAgencyChecks && !o.configured) renderAgencyStatus('setup');
+  }
+
+  async function refreshAgency() {
+    try {
+      const { status, data } = await api('/agency/overview');
+      if (status === 200 && data) renderAgencyOverview(data);
+      else if (status === 404) renderAgencyStatus('missing');
+    } catch {
+      // the GHL status already reports connection problems
+    }
+  }
+
+  function showAgencyKey(key) {
+    const node = $('a-access-key');
+    node.textContent = key;
+    node.classList.add('is-revealed');
+    $('a-reveal-key').textContent = 'Ocultar';
+    clearTimeout(agencyTimer);
+    agencyTimer = setTimeout(hideKey, KEY_VISIBLE_MS);
+  }
+
+  async function fetchAgencyKey() {
+    const { status, data } = await api('/agency/key', { method: 'POST' });
+    if (status !== 200 || !data || !data.accessKey) throw new Error('key');
+    return data.accessKey;
+  }
+
+  function wireAgency() {
+    $('a-run-checks').addEventListener('click', runAgencyChecks);
+    $('a-copy-muse').addEventListener('click', async () => {
+      const text = $('a-muse-message').textContent;
+      if (!text || text === '—') return toast('Espera un segundo: el mensaje aún se está cargando.', { error: true });
+      if (await copyText(text)) {
+        toast('Mensaje copiado. Pégalo en Muse.');
+      } else {
+        $('a-muse-message').closest('details').open = true;
+        selectNode($('a-muse-message'));
+        toast('Tu navegador no dejó copiar. El mensaje está seleccionado: mantén pulsado para copiarlo.', { error: true });
+      }
+    });
+    $('a-reveal-key').addEventListener('click', async () => {
+      if ($('a-access-key').classList.contains('is-revealed')) return hideKey();
+      try {
+        showAgencyKey(await fetchAgencyKey());
+      } catch (err) {
+        if (err instanceof NetworkError) toast('No se pudo conectar con el proxy.', { error: true });
+        else if (err.message !== 'unauthorized') toast('No se pudo obtener la llave.', { error: true });
+      }
+    });
+    $('a-copy-key').addEventListener('click', () =>
+      copySecret(fetchAgencyKey, (key) => {
+        showAgencyKey(key);
+        selectNode($('a-access-key'));
         toast('Tu navegador no dejó copiar. La llave está seleccionada: mantén pulsado para copiarla.', { error: true });
       }),
     );
@@ -815,6 +1012,7 @@
       }
     });
     wireKraken();
+    wireAgency();
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) hideKey();
       else if (!$('app').hidden) refreshActive();
@@ -833,6 +1031,7 @@
 
   function refreshActive() {
     if (view === 'kraken') refreshKraken();
+    else if (view === 'agency') refreshAgency();
     else refresh();
   }
 

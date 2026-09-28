@@ -55,6 +55,7 @@ function createMetrics({ now = () => Date.now() } = {}) {
     rejectedKey: 0,
     rejectedPin: 0,
     rateLimited: 0,
+    blocked: 0,
     ghlDenied: 0,
     upstreamErrors: 0,
     cancelled: 0,
@@ -75,6 +76,7 @@ function createMetrics({ now = () => Date.now() } = {}) {
       }
       if (flags.rejectedKey) counters.rejectedKey += 1;
       if (flags.rateLimited) counters.rateLimited += 1;
+      if (flags.blocked) counters.blocked += 1; // refused by a proxy guard (agency API)
       if (!timing) return; // /health, /admin and the rejections above are not Muse calls
       counters.calls += 1;
       const bucket = `${Math.floor(status / 100)}xx`;

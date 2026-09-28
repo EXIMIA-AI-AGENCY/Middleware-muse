@@ -74,6 +74,8 @@ function loadAgencyConfig(env = process.env, { ghl, others = [] } = {}) {
     checkMarker: enabled ? panelCheckMarker(token) : null,
     publicHost,
     companyId,
+    // Deleting a sub-account cannot be undone: off unless the owner turns it on explicitly.
+    allowDelete: (env.GHL_AGENCY_ALLOW_DELETE ?? '').trim() === 'true',
   });
 }
 

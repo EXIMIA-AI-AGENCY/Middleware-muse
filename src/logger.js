@@ -40,7 +40,7 @@ function requestLogger(logger, metrics, isCheck = () => false) {
       // A route with its own activity (the agency API) sets res.locals.metrics.
       const target = res.locals.metrics || metrics;
       if (target) {
-        const { timing, upstreamError, rejectedKey, rejectedPin, rateLimited } = res.locals;
+        const { timing, upstreamError, rejectedKey, rejectedPin, rateLimited, blocked } = res.locals;
         target.record({
           method: req.method,
           url: req.originalUrl,
@@ -48,7 +48,7 @@ function requestLogger(logger, metrics, isCheck = () => false) {
           status: res.headersSent ? res.statusCode : 499,
           timing: timing && timing.result(upstreamError),
           check: isCheck(req, res),
-          flags: { rejectedKey, rejectedPin, rateLimited },
+          flags: { rejectedKey, rejectedPin, rateLimited, blocked },
         });
       }
     });
