@@ -577,6 +577,46 @@ test('Issuing card reads and account writes: strict spellings; metadata keys sta
   assert.equal(form(stripe.requests.at(-1).body)['metadata[ghl-contact-id]'], 'abc');
 });
 
+test('JSON bodies that would blow up are refused at once, and the app stays up', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  const bodies = [
+    `{"a":${'['.repeat(6000)}1${']'.repeat(6000)}}`,
+    `{"${'k'.repeat(100000)}":{${Array.from({ length: 4000 }, (_, i) => `"x${i}":1`).join(',')}}}`,
+    `{"a":${'{"b":'.repeat(20)}1${'}'.repeat(20)}}`,
+  ];
+  for (const body of bodies) {
+    const started = Date.now();
+    const res = await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, 'Content-Type': 'application/json', ...ikey() }, body });
+    assert.equal(res.status, 400);
+    assert.equal(json(res).error.code, 'bad_json');
+    assert.equal(json(res).proxy.executed, 'no');
+    assert.ok(Date.now() - started < 2000, 'refused quickly');
+  }
+  assert.equal(stripe.requests.length, 0);
+  assert.equal((await request(`${url}/health`)).status, 200);
+});
+
+test('after a lost attempt, a 401 or a non-Stripe JSON answer is never "not done"', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  for (const step of [{ status: 401, body: { error: { type: 'invalid_request_error', code: 'api_key_expired', message: 'Expired API Key' } } }, { status: 400, body: { message: 'Bad Request' } }, { status: 400, body: [] }]) {
+    stripe.script('POST /v1/payment_intents', ['drop', step]);
+    const p = json(await request(`${url}/stripe/v1/payment_intents`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } })).proxy;
+    assert.equal(p.executed, 'unknown', JSON.stringify(step.body));
+    assert.equal(p.safe_to_retry, 'same-key');
+  }
+  // Without a retry, a Stripe 401 is a plain refusal.
+  stripe.script('POST /v1/customers', [{ status: 401, body: { error: { type: 'invalid_request_error', message: 'Invalid API Key' } } }]);
+  assert.equal(json(await request(`${url}/stripe/v1/customers`, { method: 'POST', headers: { 'X-Proxy-Key': accessKey, ...ikey() } })).proxy.executed, 'no');
+});
+
+test('a conflict on a request without an Idempotency-Key never mentions one', async (t) => {
+  const { url, stripe, accessKey } = await setup(t);
+  stripe.script('GET /v1/invoices', Array(3).fill({ status: 409, body: { error: { type: 'invalid_request_error', code: 'lock_conflict', message: 'conflict' } } }));
+  const p = json(await request(`${url}/stripe/v1/invoices`, { headers: { 'X-Proxy-Key': accessKey } })).proxy;
+  assert.equal(p.safe_to_retry, 'after-wait');
+  assert.doesNotMatch(p.next, /Idempotency-Key|null/);
+});
+
 test('error answers that are not JSON still come with the explanation', async (t) => {
   const { url, stripe, accessKey } = await setup(t);
   stripe.script('GET /v1/charges', [{ status: 400, body: 'x' }]);

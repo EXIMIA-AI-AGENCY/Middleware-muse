@@ -960,7 +960,10 @@ Muse --(X-Proxy-Key: llave de Stripe)--> /stripe/v1/* --(Bearer <clave de Stripe
   envuelto con la explicación.
 - **JSON aceptado en /v1:** Stripe espera `x-www-form-urlencoded`; si Muse
   manda JSON, el proxy lo convierte como las librerías oficiales
-  (`items[0][price]=…`) y lo indica en `X-Proxy-Converted`.
+  (`items[0][price]=…`) y lo indica en `X-Proxy-Converted`. Un JSON con más
+  de 12 niveles, más de 5000 valores o que convertido pasaría de 2 MB se
+  rechaza al instante (`400 bad_json`), para que ningún cuerpo pueda agotar la
+  memoria del servidor.
 - **Versión fija:** si Muse no manda `Stripe-Version`, el proxy manda
   `2026-08-26.dahlia` (o `STRIPE_API_VERSION`).
 

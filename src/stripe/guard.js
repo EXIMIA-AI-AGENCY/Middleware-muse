@@ -153,6 +153,39 @@ const needsParams = (method, path) =>
 /** Routes whose parameters must be written in one unambiguous way (v1 account create/update, Issuing card reads). */
 const strictParams = (method, path) => (method === 'POST' && V1_ACCOUNT_ROUTES.some((re) => re.test(path))) || ISSUING_CARDS.test(path);
 
+// Stripe parameters nest a few levels (line_items[0][price_data][product_data][metadata][k])
+// and never have thousands of values; anything beyond these bounds is refused before any
+// work, so a small body can never blow up into a huge conversion.
+const MAX_JSON_DEPTH = 12;
+const MAX_JSON_VALUES = 5000;
+// Size of every parameter name (with its full a[b][c] path) plus its value, once converted.
+const MAX_EXPANDED_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Whether a parsed JSON value fits those bounds, including its size once every nested name
+ * is written out in full. Iterative (no recursion), so even a pathological nesting cannot
+ * overflow the stack.
+ */
+function jsonWithinBounds(value) {
+  const stack = [[value, 0, 0]];
+  let values = 0;
+  let bytes = 0;
+  while (stack.length) {
+    const [node, depth, nameLength] = stack.pop();
+    values += 1;
+    bytes += nameLength + 2;
+    if (values > MAX_JSON_VALUES || bytes > MAX_EXPANDED_BYTES) return false;
+    if (node && typeof node === 'object') {
+      if (depth >= MAX_JSON_DEPTH) return false;
+      for (const [key, inner] of Object.entries(node)) stack.push([inner, depth + 1, nameLength + key.length + 2]);
+    } else {
+      bytes += String(node).length;
+      if (bytes > MAX_EXPANDED_BYTES) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * JSON -> Stripe form encoding, the way Stripe's own libraries send it:
  * {metadata: {a: 1}, items: [{price: "p"}], expand: ["x"]} ->
@@ -183,4 +216,4 @@ function jsonPairs(value, prefix = '', out = []) {
   return out;
 }
 
-module.exports = { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, CANONICAL_KEY, MONEY_OUT, ACCESS };
+module.exports = { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, jsonWithinBounds, CANONICAL_KEY, MONEY_OUT, ACCESS };

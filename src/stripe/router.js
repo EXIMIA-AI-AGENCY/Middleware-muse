@@ -6,7 +6,7 @@ const { sendJson } = require('../http-util');
 const { createTiming } = require('../metrics');
 const { HOP_BY_HOP } = require('./client');
 const { explainStripeError, explainNoAnswer } = require('./explain');
-const { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, CANONICAL_KEY } = require('./guard');
+const { stripePath, blockedBy, needsParams, strictParams, toForm, jsonKeys, jsonPairs, jsonWithinBounds, CANONICAL_KEY } = require('./guard');
 
 const sha256 = (value) => crypto.createHash('sha256').update(value, 'utf8').digest();
 const same = (value, expectedHash) => typeof value === 'string' && value.length > 0 && crypto.timingSafeEqual(sha256(value), expectedHash);
@@ -113,6 +113,9 @@ function createStripeRouter({ config, client, logger, metrics, limiter }) {
         }
         if (!json || typeof json !== 'object' || Array.isArray(json)) {
           return proxyError(res, 400, 'bad_json', 'El cuerpo JSON debe ser un objeto {...}. No se envió nada a Stripe.', { safe_to_retry: 'no', next: 'Manda los parámetros como un objeto JSON.' });
+        }
+        if (!jsonWithinBounds(json)) {
+          return proxyError(res, 400, 'bad_json', 'El cuerpo JSON está demasiado anidado o tiene demasiados valores para Stripe. No se envió nada a Stripe.', { safe_to_retry: 'no', next: 'Revisa el cuerpo: Stripe no usa más de unos pocos niveles de anidación.' });
         }
         if (v1) {
           body = Buffer.from(toForm(json), 'utf8');
