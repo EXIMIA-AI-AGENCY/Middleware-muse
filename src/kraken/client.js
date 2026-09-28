@@ -227,7 +227,7 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = ATTEMP
         lockedUntil = now() + LOCKOUT_PAUSE_MS;
         return { ...res, attempts, krakenStatus };
       }
-      if (info && info.code === 'EService:Unavailable') {
+      if (info && info.code === 'EService:Unavailable' && budgetMs - (now() - started) > STATUS_TIMEOUT_MS + 1000) {
         krakenStatus = await systemStatus();
         if (krakenStatus === 'maintenance') return { ...res, attempts, krakenStatus };
       }
@@ -235,8 +235,9 @@ function createKrakenClient(config, { now = () => Date.now(), timeoutMs = ATTEMP
       if (wait === null) return { ...res, attempts, krakenStatus };
       attempts[attempts.length - 1].retriedAfterMs = wait;
       await sleep(wait);
-      // A retry is a new request: never send one nobody is waiting for.
-      if (isCancelled()) {
+      // A retry is a new request: never send one nobody is waiting for. Cancels still go ahead:
+      // repeating one is harmless and it protects the account.
+      if (policy !== 'cancel' && isCancelled()) {
         delete attempts[attempts.length - 1].retriedAfterMs;
         return { ...res, attempts, krakenStatus, callerGone: true };
       }

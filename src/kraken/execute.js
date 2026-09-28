@@ -187,7 +187,8 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
   function followUp(method, params, deadline) {
     const left = deadline - now() - 300;
     if (left < 1000) return Promise.resolve({ status: 0, error: 'expired', notSent: true, attempts: [] });
-    return client.privateCall(method, params, { policy: 'read', budgetMs: Math.min(FOLLOW_UP_BUDGET_MS, left) });
+    // deadlineAt also covers the wait in the queue behind other calls.
+    return client.privateCall(method, params, { policy: 'read', budgetMs: Math.min(FOLLOW_UP_BUDGET_MS, left), deadlineAt: deadline - 300 });
   }
 
   async function queryOrders(txids, deadline) {
@@ -302,7 +303,8 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
       const same = targets.every((t) => t.ref.cl_ord_id !== undefined) ? ' con el mismo cl_ord_id (así Kraken rechaza la copia si la primera sigue abierta; no protege si la primera ya se ejecutó)' : ' (con userref Kraken no evita duplicados)';
       return `Espera ~60 s y vuelve a buscarla (${lookup}: ${refs}). Si sigue sin aparecer, reenvíala${same}.`;
     }
-    return `NO la reenvíes todavía. En unos segundos busca ${refs} en ${lookup}. Solo si no aparece, reenvíala.`;
+    const same = targets.every((t) => t.ref.cl_ord_id !== undefined) ? ' con el mismo cl_ord_id' : '';
+    return `NO la reenvíes todavía. Espera ~60 s, búscala (${lookup}: ${refs}) y solo si no aparece, reenvíala${same}.`;
   }
 
   async function describeSuccess({ method, params, ids, changes, res, submittedAt, deadline, validateOnly }) {
@@ -355,15 +357,16 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
       const yes = orders.filter((o) => o.placed === 'yes').length;
       const no = orders.filter((o) => o.placed === 'no').length;
       const unsure = orders.length - yes - no;
-      const executed = yes === orders.length ? 'yes' : no === orders.length ? 'no' : yes === 0 && no === 0 ? 'unknown' : 'partial';
+      // 'partial' needs at least one order confirmed as placed.
+      const executed = yes === orders.length ? 'yes' : no === orders.length ? 'no' : yes === 0 ? 'unknown' : 'partial';
       const summary = [`${yes} de ${orders.length} órdenes creadas${no ? `; ${no} rechazadas por Kraken (motivo en proxy.orders)` : ''}${unsure ? `; de ${unsure} no se sabe` : ''}.`];
       if (validateOnly) summary.push('ATENCIÓN: Kraken creó órdenes aunque se envió validate.');
       return build({
         ...common,
         executed,
         summary: summary.join(' '),
-        next: unsure ? 'NO reenvíes las que tienen placed = "yes", ni las "unknown" sin buscarlas antes (OpenOrders/ClosedOrders con su cl_ord_id).' : no ? 'Revisa las rechazadas; reenvía solo esas si quieres. NO reenvíes las creadas.' : 'Hecho. Para seguirlas usa QueryOrders con los txid.',
-        retry: unsure ? { automaticRetries: 0, safeToRetry: 'check-first' } : undefined,
+        next: unsure ? 'NO reenvíes las que tienen placed = "yes". Las "unknown": espera ~60 s, búscalas (OpenOrders/ClosedOrders con su cl_ord_id) y reenvía solo las que no aparezcan, con su mismo cl_ord_id.' : no ? 'Revisa las rechazadas; reenvía solo esas si quieres. NO reenvíes las creadas.' : 'Hecho. Para seguirlas usa QueryOrders con los txid.',
+        retry: unsure ? { automaticRetries: 0, safeToRetry: 'check-first', afterSeconds: 60 } : undefined,
         orders,
         verification,
       });
@@ -412,10 +415,17 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
       if (reason === 'no-txid') executed = 'unknown';
       else if (info) executed = info.executed === 'no' ? 'no' : 'unknown';
       else executed = res.notSent || NEVER_RECEIVED.has(res.status) || ['busy', 'locked', 'expired'].includes(res.error) ? 'no' : 'unknown';
-      // Maintenance: Kraken's engine is off, so nothing can have run.
-      if (executed === 'unknown' && info && info.code === 'EService:Unavailable' && res.krakenStatus === 'maintenance') executed = 'no';
-      // A validate-only order can never be placed.
-      if (executed === 'unknown' && validateOnly) executed = 'no';
+    }
+    let forced;
+    // Maintenance: Kraken's engine is off, so nothing can have run.
+    if (executed === 'unknown' && info && info.code === 'EService:Unavailable' && res.krakenStatus === 'maintenance') {
+      executed = 'no';
+      forced = { retry: { safe: 'after-wait', afterSeconds: 300 }, next: 'Kraken está en mantenimiento: no se ejecutó nada. Reintenta cuando vuelva a estar online.' };
+    }
+    // A validate-only order can never be placed.
+    if (executed === 'unknown' && validateOnly) {
+      executed = 'no';
+      forced = { retry: { safe: 'after-wait', afterSeconds: 5 }, next: 'Era solo validación: no se creó nada. Repite la validación en unos segundos si quieres.' };
     }
 
     // Catalog texts talk about new orders; for an amend the order exists and stays as it was.
@@ -430,6 +440,10 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
     let next = info ? info.next : undefined;
     if (info && method === 'AmendOrder' && info.kind === 'orderRate') next = 'Espera unos segundos y reenvía el mismo AmendOrder.';
     let retry = retryAdvice(kind, method, info, res, now());
+    if (forced) {
+      retry = forced.retry;
+      next = forced.next;
+    }
     let verification;
     let orders;
     let order;
@@ -443,7 +457,7 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
       else orders = v.orders.map((o, i) => ({ index: i, ...o }));
       summary.push(verifiedSentence(v));
       next = verifiedNext(v, ids);
-      retry = v.executed === 'yes' ? { safe: 'no' } : v.notFound ? { safe: 'check-first', afterSeconds: 60 } : { safe: 'check-first' };
+      retry = v.executed === 'yes' ? { safe: 'no' } : { safe: 'check-first', afterSeconds: 60 };
     } else if (method === 'AmendOrder' && executed === 'unknown') {
       order = await currentOrder(params, deadline);
       summary.push(order ? `No se sabe si el cambio se aplicó. La orden ahora está ${orderText(order)}: compárala con lo que pediste.` : 'No se sabe si el cambio se aplicó y no se pudo consultar la orden.');
@@ -458,6 +472,12 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
         summary.push('La canceló un intento anterior del proxy cuya respuesta se perdió.');
         next = 'Hecho: ya está cancelada.';
         retry = { safe: 'no' };
+      } else if (method === 'CancelOrder' && !live && !(order && order.status === 'closed') && earlierMayHaveRun(res)) {
+        // The first try went out and its answer was lost: it may well be what cancelled it.
+        executed = 'unknown';
+        summary.push('Un intento anterior del proxy quedó sin respuesta y pudo ser el que la canceló.');
+        next = 'Consulta la orden (QueryOrders con el txid, o ClosedOrders): si aparece cancelada, ya está hecho.';
+        retry = { safe: 'check-first' };
       } else if (live) {
         next = method === 'CancelOrder' ? 'La orden sigue activa (Kraken aún no la tenía en el libro): repite la misma cancelación en 1-2 s (es seguro).' : 'La orden sigue activa sin el cambio: repite el mismo AmendOrder en 1-2 s (es seguro: fija valores absolutos).';
         retry = { safe: 'after-wait', afterSeconds: 2 };
@@ -543,7 +563,8 @@ function createExecutor({ client, sleep = defaultSleep, now = () => Date.now(), 
     const submittedAt = now();
     const deadline = submittedAt + totalMs[kind];
     const validateOnly = (method === 'AddOrder' || method === 'AddOrderBatch') && params.validate !== undefined;
-    const res = await client.privateCall(method, params, { policy: kind, isCancelled, deadlineAt: kind === 'create' ? deadline - lookupReserveMs : deadline });
+    const reserve = kind === 'create' ? lookupReserveMs : kind === 'cancel' ? Math.min(lookupReserveMs, 4000) : 0;
+    const res = await client.privateCall(method, params, { policy: kind, isCancelled, deadlineAt: deadline - reserve });
     if (res.error === 'cancelled') return { cancelled: true, res };
     const success = okJson(res);
     if (success && kind === 'read') return { status: res.status, text: res.text, res };

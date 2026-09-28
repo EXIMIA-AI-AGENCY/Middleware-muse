@@ -1058,3 +1058,95 @@ test('malformed order maps from Kraken never lose the answer', async (t) => {
   assert.equal(body.result.txid.length, 1);
   assert.equal(body.proxy.executed, 'yes');
 });
+
+// ---------- fixes from the fix verification ----------
+
+test('order lookups keep the request deadline even when another call holds the queue', async (t) => {
+  const pending = [];
+  const hang = (record) => pending.push(record); // never answers
+  const kraken = await startFakeKraken({ handlers: { AddOrder: hang, Balance: hang, OpenOrders: hang, ClosedOrders: hang } });
+  t.after(async () => {
+    pending.forEach((r) => r.destroy());
+    await kraken.close();
+  });
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url, ENABLE_TRADING: 'true' });
+  const policies = { read: { budgetMs: 2500, fresh: false }, cancel: { budgetMs: 2500, fresh: false }, create: { budgetMs: 1500, fresh: true } };
+  const client = createKrakenClient(config, { timeoutMs: 1000, policies });
+  const { createExecutor } = require('../src/kraken/execute');
+  const { normalizeParams } = require('../src/kraken/params');
+  const executor = createExecutor({ client, verifyDelaysMs: [100, 100], totalMs: { read: 2500, cancel: 2500, create: 4000 }, lookupReserveMs: 2000 });
+  const prepared = normalizeParams('AddOrder', ORDER);
+  const started = Date.now();
+  const order = executor.run({ method: 'AddOrder', readOnly: false, params: prepared.params, changes: prepared.changes, ids: prepared.ids });
+  // A read arrives while the order is being checked and holds the queue.
+  setTimeout(() => executor.run({ method: 'Balance', readOnly: true, params: {} }), 1700);
+  const out = await order;
+  const took = Date.now() - started;
+  assert.ok(took < 4500, `order answered after ${took} ms (limit 4000)`);
+  assert.equal(out.proxy.executed, 'unknown');
+});
+
+test('cancel: Unknown order on the retry and the lookup fails -> "unknown", not "no"', async (t) => {
+  let n = 0;
+  const handlers = {
+    CancelOrder: (record, json, fake) => {
+      n += 1;
+      if (n === 1) {
+        fake.book.get(record.params.txid).status = 'canceled';
+        return record.destroy();
+      }
+      return json(200, { error: ['EOrder:Unknown order'] });
+    },
+    QueryOrders: (record, json) => json(200, { error: ['EService:Busy'] }),
+  };
+  const { url, kraken, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const txid = kraken.fake.place(ORDER);
+  const p = proxyOf(await call(url, { method: 'CancelOrder', params: { txid } }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(p.executed, 'unknown');
+  assert.equal(p.retry.safeToRetry, 'check-first');
+});
+
+test('validate-only and maintenance: "not executed" comes with matching advice', async (t) => {
+  const handlers = { AddOrder: (record, json) => json(200, { error: ['EService:Unavailable'] }) };
+  const { url, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' }, systemStatus: 'maintenance' });
+  const live = proxyOf(await call(url, { method: 'AddOrder', params: ORDER }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(live.executed, 'no');
+  assert.equal(live.retry.safeToRetry, 'after-wait');
+  assert.equal(live.retry.afterSeconds, 300);
+  const dry = proxyOf(await call(url, { method: 'AddOrder', params: { ...ORDER, validate: true } }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(dry.executed, 'no');
+  assert.equal(dry.retry.safeToRetry, 'after-wait');
+});
+
+test('batch with one rejected and one unaccounted order is "unknown", never "partial"', async (t) => {
+  const handlers = { AddOrderBatch: (record, json) => json(200, { error: [], result: { orders: [{ error: 'EOrder:Insufficient funds' }, { descr: { order: 'x' } }] } }) };
+  const { url, accessKey } = await setup(t, { handlers, env: { ENABLE_TRADING: 'true' } });
+  const orders = [{ ordertype: 'limit', type: 'buy', volume: '0.01', price: '1000' }, { ordertype: 'limit', type: 'buy', volume: '0.02', price: '900' }];
+  const p = proxyOf(await call(url, { method: 'AddOrderBatch', params: { pair: 'XBTUSD', orders } }, { 'X-Proxy-Key': accessKey }));
+  assert.equal(p.executed, 'unknown');
+  assert.equal(p.orders[0].placed, 'no');
+  assert.equal(p.orders[1].placed, 'unknown');
+  assert.equal(p.retry.afterSeconds, 60);
+});
+
+test('a cancel retry still goes out after Muse hung up (it protects the account)', async (t) => {
+  let n = 0;
+  let gone = false;
+  const handlers = {
+    CancelAll: (record, json) => {
+      n += 1;
+      if (n === 1) {
+        gone = true; // Muse hangs up while the proxy waits to repeat
+        return json(502, '<html>bad gateway</html>');
+      }
+      return json(200, { error: [], result: { count: 2 } });
+    },
+  };
+  const kraken = await startFakeKraken({ handlers });
+  t.after(() => kraken.close());
+  const config = loadKrakenConfig({ KRAKEN_API_KEY: API_KEY, KRAKEN_API_SECRET: SECRET, KRAKEN_BASE_URL: kraken.url, ENABLE_TRADING: 'true' });
+  const client = createKrakenClient(config);
+  const res = await client.privateCall('CancelAll', {}, { policy: 'cancel', isCancelled: () => gone });
+  assert.equal(n, 2);
+  assert.equal(res.status, 200);
+});

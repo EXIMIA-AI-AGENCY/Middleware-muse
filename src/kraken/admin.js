@@ -110,7 +110,7 @@ Reglas:
 - El proxy ya reintenta solo cuando es seguro (nonce, límites de Kraken, conexión que no llegó a salir). No añadas reintentos por tu cuenta salvo que \`safeToRetry\` lo permita.
 - Pon SIEMPRE tu propio \`cl_ord_id\` en AddOrder y en cada orden de AddOrderBatch (un UUID nuevo por orden, p. ej. \`6d1b345e-2821-40e2-ad83-4ecb18a06876\`). Si no lo pones, el proxy añade uno y te lo devuelve en \`proxy.order.cl_ord_id\`, pero solo lo verás si te llega la respuesta.
 - Si la respuesta de Kraken se pierde, el proxy busca la orden en Kraken por su \`cl_ord_id\` y te dice lo que encontró. Usa \`userref\` solo si es único por orden: Kraken no lo trata como identificador.
-- NUNCA reenvíes una orden con \`executed\` = \`"yes"\`. Con \`"unknown"\`, sigue \`proxy.next\`: búscala (OpenOrders y ClosedOrders con \`cl_ord_id\`) y reenvíala solo si no aparece, con el MISMO \`cl_ord_id\`. Con \`"no"\` puedes reenviarla.
+- NUNCA reenvíes una orden con \`executed\` = \`"yes"\`. Con \`"unknown"\`, sigue \`proxy.next\`: espera ~60 s, búscala (OpenOrders y ClosedOrders con \`cl_ord_id\`) y reenvíala solo si no aparece, con el MISMO \`cl_ord_id\`. Con \`"no"\` puedes reenviarla.
 - Las órdenes pueden tardar hasta ~30 s en responder cuando Kraken va lento (el proxy comprueba qué pasó). Usa un timeout de al menos 45 s en las llamadas de trading.
 - Si no te llega NINGUNA respuesta del proxy (timeout o conexión cortada), NO repitas la orden: busca tu \`cl_ord_id\` en OpenOrders y ClosedOrders, y reenvíala solo si no aparece.
 - Los números pueden ir como número o como texto: el proxy los manda en decimal (\`0.0000001\`, nunca \`1e-7\`).
