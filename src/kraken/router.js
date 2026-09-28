@@ -145,7 +145,7 @@ function createKrakenRouter({ config, client, metrics, limiter, logger, executor
         const body = typeof req.body === 'string' && req.body.length ? parseBody(req.body) : null;
         const named = body && typeof body.method === 'string' ? body.method.slice(0, 40) : null;
         const bad = (status, error) => {
-          done(status, { method: named, error });
+          done(status, { method: named, error, explain: rejection(status, error, { method: named }).summary });
           return reply(res, status, error, {}, { method: named, trading: false });
         };
         if (!isPlainObject(body)) return bad(400, `EProxy:Invalid JSON body; ${HINT}`);
@@ -155,7 +155,7 @@ function createKrakenRouter({ config, client, metrics, limiter, logger, executor
 
         const allowed = checkMethod(body.method, { trading: config.trading });
         if (!allowed.ok) {
-          done(allowed.status, { method: named, error: allowed.error });
+          done(allowed.status, { method: named, error: allowed.error, explain: rejection(allowed.status, allowed.error, { method: named }).summary });
           return reply(res, allowed.status, allowed.error, {}, { method: named, trading: /Trading is disabled/.test(allowed.error) });
         }
         const paramError = checkParams(allowed.method, params);
