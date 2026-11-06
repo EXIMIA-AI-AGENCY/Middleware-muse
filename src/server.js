@@ -51,7 +51,17 @@ function loadStripe() {
   }
 }
 const stripe = loadStripe();
-const app = createApp(config, logger, { kraken, agency, stripe });
+// Same rule for OAuth on /mcp/: optional (MCP_OAUTH_PASSWORD), isolated, never takes the rest down.
+function loadOAuth() {
+  try {
+    return require('./oauth').tryCreateOAuth({ env: process.env, ghlConfig: config, logger });
+  } catch (err) {
+    logger.error({ msg: 'mcp_oauth_disabled', name: err && err.name });
+    return null;
+  }
+}
+const oauth = loadOAuth();
+const app = createApp(config, logger, { kraken, agency, stripe, oauth });
 const server = http.createServer(app);
 // During shutdown, answer on any connection and then close it, so no new work lands here.
 server.prependListener('request', (req, res) => {

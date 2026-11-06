@@ -50,7 +50,17 @@ function loadStripe() {
   }
 }
 const stripe = loadStripe();
-const app = createApp(config, logger, { kraken, agency, stripe });
+// Same rule for OAuth on /mcp/: optional (MCP_OAUTH_PASSWORD), isolated, never takes the rest down.
+function loadOAuth() {
+  try {
+    return require('./oauth').tryCreateOAuth({ env: process.env, ghlConfig: config, logger });
+  } catch (err) {
+    logger.error({ msg: 'mcp_oauth_disabled', name: err && err.name });
+    return null;
+  }
+}
+const oauth = loadOAuth();
+const app = createApp(config, logger, { kraken, agency, stripe, oauth });
 // The dashboard tests the proxy through its public production URL, exactly like Muse.
 const productionHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
 if (productionHost) app.locals.selfUrl = `https://${productionHost}`;

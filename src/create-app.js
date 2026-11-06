@@ -7,6 +7,7 @@ const { requireProxyKey } = require('./auth');
 const { sendJson } = require('./http-util');
 const { requestLogger } = require('./logger');
 const { createMetrics } = require('./metrics');
+const { isMcpRequest } = require('./oauth');
 const { createForwarder } = require('./proxy');
 const { createRateLimiter, rateLimitByKey } = require('./rate-limit');
 
@@ -19,11 +20,12 @@ const { createRateLimiter, rateLimitByKey } = require('./rate-limit');
  *   ALL  /agency/* -> GHL with the AGENCY token (its own key; see src/agency; only when passed in)
  *   /stripe/v1/*  -> Stripe (its own key; see src/stripe; only when passed in)
  *   /admin        -> operator dashboard (ADMIN_PIN session; only when ADMIN_PIN is set)
+ *   /.well-known/oauth-*, /oauth/* -> OAuth for /mcp/ (see src/oauth; only when passed in)
  *
  * `app.locals.selfUrl` (set by the caller once listening) lets the dashboard test the
  * proxy the same way Muse uses it.
  */
-function createApp(config, logger, { adminOptions = {}, kraken = null, agency = null, stripe = null } = {}) {
+function createApp(config, logger, { adminOptions = {}, kraken = null, agency = null, stripe = null, oauth = null } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.disable('etag');
@@ -64,8 +66,23 @@ function createApp(config, logger, { adminOptions = {}, kraken = null, agency = 
     app.get('/', (req, res) => res.redirect(302, '/admin'));
   }
 
-  // Everything below requires the proxy key.
-  app.use(requireProxyKey(config.proxyKey));
+  // OAuth for /mcp/ (Claude custom connectors). Its own routes need no key.
+  if (oauth) app.use(oauth.router);
+
+  // Everything below requires the proxy key, or, on /mcp/ only, a valid OAuth access token.
+  const proxyKeyCheck = requireProxyKey(config.proxyKey, {
+    challenge: oauth ? (req) => (isMcpRequest(req) ? oauth.challenge(req) : null) : null,
+  });
+  app.use((req, res, next) => {
+    if (!oauth || req.headers['x-proxy-key'] !== undefined || !isMcpRequest(req)) return proxyKeyCheck(req, res, next);
+    const bearer = oauth.checkBearer(req);
+    if (bearer === 'valid') return next();
+    if (bearer === 'invalid') {
+      res.locals.rejectedKey = true;
+      return sendJson(res, 401, { error: 'invalid_token' }, { 'WWW-Authenticate': oauth.challenge(req, 'invalid_token') });
+    }
+    return proxyKeyCheck(req, res, next);
+  });
   app.use(rateLimitByKey(limiter));
 
   app.use('/ghl', createForwarder(config, logger, { kind: 'rest', pathPrefix: '' }));

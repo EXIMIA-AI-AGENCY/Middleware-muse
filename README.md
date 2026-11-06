@@ -505,6 +505,26 @@ es **la distancia de red** entre Muse y la región del proxy:
   persistente en lugar de `urllib` sin más), se ahorra el TLS en cada
   llamada: ~90 ms menos desde lejos.
 
+## Conector de Claude (OAuth en /mcp/)
+
+Los conectores personalizados de Claude no pueden mandar `X-Proxy-Key`, así que `/mcp/` también acepta un token OAuth 2.1. Es opcional: sin `MCP_OAUTH_PASSWORD`, todo funciona igual que antes y solo vale `X-Proxy-Key`.
+
+**Activarlo**
+
+1. En Vercel (Settings -> Environment Variables, entorno Production) crea `MCP_OAUTH_PASSWORD`: una contraseña larga solo tuya (16 caracteres o más; recomendado `openssl rand -base64 24`). Marca *Sensitive*.
+2. Redeploy de producción.
+3. En Claude: Settings -> Connectors -> Add custom connector, URL `https://ghl-proxy-muse.vercel.app/mcp/`. Claude abre la página de autorización del proxy: escribe esa contraseña y dale Autorizar.
+
+**Cómo funciona**
+
+- `GET /.well-known/oauth-protected-resource` y `/.well-known/oauth-authorization-server` anuncian el servidor; un 401 en `/mcp/` trae `WWW-Authenticate: Bearer resource_metadata=...`.
+- `POST /oauth/register` (registro dinámico), `/oauth/authorize` (página de consentimiento con la contraseña del dueño, PKCE S256 obligatorio) y `POST /oauth/token` (`authorization_code` y `refresh_token`).
+- Sin estado: el `client_id`, los códigos y los tokens van firmados con una llave derivada de `PROXY_KEY` + `MCP_OAUTH_PASSWORD`. Cambiar cualquiera de las dos revoca todos los clientes y tokens de una vez.
+- Access token: 1 hora. Refresh token: 30 días, renovable con cada uso.
+- El token solo abre `/mcp/`. `/ghl`, `/agency`, `/stripe` y `/api/kraken` siguen pidiendo su llave.
+- Redirecciones permitidas: `https://claude.ai`, `https://claude.com` y loopback (`http://localhost`, `http://127.0.0.1`). Para otro cliente, añade su origen https en `MCP_OAUTH_REDIRECT_ORIGINS` (separados por coma).
+- Contraseña incorrecta: máximo 10 intentos por IP y 50 en total cada 15 minutos (por instancia).
+
 ## Handoff a Muse
 
 0. Lo más fácil: abre `https://<host>/admin`, entra con el PIN y usa la
@@ -1044,6 +1064,7 @@ src/
   kraken/        Kraken: config, lista de métodos, firma, cliente, /api/kraken, panel
   agency/        GHL Agencia: config, /agency (token de agencia, bloqueo de borrado), panel
   stripe/        Stripe: config, bloqueos, reintentos seguros, /stripe, panel
+  oauth/         OAuth 2.1 para /mcp/ (conector de Claude): metadata, registro, consentimiento, tokens firmados
   canonical-path.js  ruta normalizada para los bloqueos de /agency
   logger.js      logs JSON: method, path, status, ms
 test/            node:test + GHL (subcuenta y agencia), Kraken y Stripe simulados
