@@ -147,6 +147,12 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
 
     const path = `${pathPrefix}${req.url}`;
     const headers = buildUpstreamHeaders(req, config, kind);
+    // A middleware in front (the agency MCP tools) may have read the body already.
+    const buffered = Buffer.isBuffer(req.bufferedBody) ? req.bufferedBody : null;
+    if (buffered) {
+      delete headers['transfer-encoding'];
+      headers['content-length'] = String(buffered.length);
+    }
     const hasBody =
       (headers['content-length'] !== undefined && headers['content-length'] !== '0') ||
       headers['transfer-encoding'] !== undefined;
@@ -160,7 +166,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
     // When the upstream exchange ends before the client finished uploading (early
     // response or error), discard the rest of the body so the client can read our answer.
     const drainRequest = () => {
-      if (!req.complete) {
+      if (!buffered && !req.complete) {
         req.unpipe();
         req.resume();
       }
@@ -211,7 +217,7 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         finished = true;
         // GHL answered before the upload finished (e.g. 401/413): the exchange is over,
         // so stop forwarding the body and discard the rest (RFC 9112 §9.3).
-        if (!req.complete) {
+        if (!buffered && !req.complete) {
           outgoing.destroy();
           drainRequest();
         }
@@ -276,7 +282,9 @@ function createForwarder(config, logger, { kind, pathPrefix }) {
         drainRequest();
       });
 
-      if (attempt === 0 && hasBody) {
+      if (buffered) {
+        outgoing.end(buffered);
+      } else if (attempt === 0 && hasBody) {
         req.pipe(outgoing);
       } else {
         outgoing.end();

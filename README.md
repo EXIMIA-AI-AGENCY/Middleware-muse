@@ -877,7 +877,7 @@ Muse --(X-Proxy-Key: llave de agencia)--> /agency/* --(Bearer <token de agencia>
   abre `/agency`, y la de agencia no abre `/ghl`, `/mcp` ni Kraken.
 - Sin el token de agencia, `/agency` responde `503 agency_not_configured` y
   todo lo demás sigue exactamente igual.
-- No hay MCP en esta API (el MCP de GHL es por subcuenta): solo REST.
+- **En el MCP:** con el token de agencia configurado, el mismo `/mcp/` (el conector de Claude) suma herramientas de agencia a las de Eximia: `agency_get-company`, `agency_list-sub-accounts`, `agency_get-sub-account`, `agency_list-users`, `agency_api-request` (cualquier ruta v2 con el token de agencia; `{companyId}` se rellena solo) y `agency_sub-account-request` (una ruta dentro de otra subcuenta, con un token de esa subcuenta que el proxy pide a GHL vía `POST /oauth/locationToken`; si GHL no lo da, la herramienta lo dice). Borrar subcuentas sigue bloqueado. Sin el token de agencia, `/mcp/` es exactamente el MCP de GHL.
 
 ### Qué puede y qué no puede hacer
 

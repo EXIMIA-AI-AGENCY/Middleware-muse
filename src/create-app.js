@@ -7,6 +7,7 @@ const { requireProxyKey } = require('./auth');
 const { sendJson } = require('./http-util');
 const { requestLogger } = require('./logger');
 const { createMetrics } = require('./metrics');
+const { createAgencyMcp } = require('./agency/mcp-tools');
 const { isMcpRequest } = require('./oauth');
 const { createForwarder } = require('./proxy');
 const { createRateLimiter, rateLimitByKey } = require('./rate-limit');
@@ -86,6 +87,10 @@ function createApp(config, logger, { adminOptions = {}, kraken = null, agency = 
   app.use(rateLimitByKey(limiter));
 
   app.use('/ghl', createForwarder(config, logger, { kind: 'rest', pathPrefix: '' }));
+  // With the agency token configured, the same /mcp/ also lists and answers the agency tools.
+  if (agency && agency.config.enabled) {
+    app.use('/mcp', createAgencyMcp({ agencyConfig: agency.config, ghlConfig: config, logger }));
+  }
   app.use('/mcp', createForwarder(config, logger, { kind: 'mcp', pathPrefix: '/mcp' }));
 
   app.use((req, res) => {
