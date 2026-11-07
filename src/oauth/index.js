@@ -2,8 +2,9 @@
 
 /**
  * OAuth 2.1 for /mcp/, so the proxy can be added as a custom connector in Claude (which
- * cannot send X-Proxy-Key). Optional and isolated, like Kraken: without MCP_OAUTH_PASSWORD,
- * or with a bad one, this module is off and /mcp/ keeps accepting only X-Proxy-Key.
+ * cannot send X-Proxy-Key). The owner authorizes a connector with MCP_OAUTH_PASSWORD or, when
+ * that is not set, the dashboard ADMIN_PIN. Optional and isolated, like Kraken: with neither,
+ * or with a bad password, this module is off and /mcp/ keeps accepting only X-Proxy-Key.
  *
  * Stateless on purpose (Vercel functions keep nothing between calls): client ids, codes and
  * tokens are signed with a key derived from PROXY_KEY and MCP_OAUTH_PASSWORD. Changing either
@@ -42,16 +43,26 @@ class OAuthConfigError extends Error {
 }
 
 function loadOAuthConfig(env, ghlConfig) {
-  const password = (env.MCP_OAUTH_PASSWORD ?? '').trim();
-  if (!password) return { enabled: false };
+  const own = (env.MCP_OAUTH_PASSWORD ?? '').trim();
+  // Without its own password, the dashboard PIN (already validated by loadConfig) authorizes
+  // connectors, so the owner can connect Claude without setting up anything new.
+  if (!own) {
+    if (!ghlConfig.adminPin) return { enabled: false };
+    return { ...finish(env, ghlConfig, ghlConfig.adminPin), source: 'admin_pin' };
+  }
+  const password = own;
   // Messages name the variable, never its value.
   if (!PRINTABLE.test(password)) throw new OAuthConfigError('MCP_OAUTH_PASSWORD contains non-printable characters');
   if (password.length < MIN_PASSWORD_LENGTH || password.length > 256) {
     throw new OAuthConfigError(`MCP_OAUTH_PASSWORD must be between ${MIN_PASSWORD_LENGTH} and 256 characters`);
   }
-  if ([ghlConfig.proxyKey, ghlConfig.ghlToken, ghlConfig.adminPin].includes(password)) {
-    throw new OAuthConfigError('MCP_OAUTH_PASSWORD must be different from PROXY_KEY, GHL_TOKEN and ADMIN_PIN');
+  if ([ghlConfig.proxyKey, ghlConfig.ghlToken].includes(password)) {
+    throw new OAuthConfigError('MCP_OAUTH_PASSWORD must be different from PROXY_KEY and GHL_TOKEN');
   }
+  return { ...finish(env, ghlConfig, password), source: 'mcp_oauth_password' };
+}
+
+function finish(env, ghlConfig, password) {
   const extra = (env.MCP_OAUTH_REDIRECT_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -328,9 +339,9 @@ function createOAuth({ env = process.env, ghlConfig, logger, now = () => Date.no
       .join('');
     const inner = `<h1>Autorizar acceso a GoHighLevel</h1>
 <p><b>${escapeHtml(ar.client.n)}</b> quiere usar las herramientas MCP de GoHighLevel (subcuenta Eximia) a través de este proxy.</p>
-<div class="box">Al autorizar, regresas a <b>${escapeHtml(host)}</b>. El acceso es solo al MCP, no al REST, y dura hasta que cambies la contraseña del dueño.</div>
+<div class="box">Al autorizar, regresas a <b>${escapeHtml(host)}</b>. El acceso es solo al MCP, no al REST, y dura hasta que cambies ${config.source === 'admin_pin' ? 'el PIN del panel' : 'la contraseña del dueño'}.</div>
 <form method="post" action="/oauth/authorize">${fields}
-<label for="pw">Contraseña del dueño</label><input id="pw" name="password" type="password" autocomplete="current-password" autofocus>
+<label for="pw">${config.source === 'admin_pin' ? 'PIN del panel /admin' : 'Contraseña del dueño'}</label><input id="pw" name="password" type="password" autocomplete="current-password" autofocus>
 ${problem ? `<p class="err">${escapeHtml(problem)}</p>` : ''}
 <div class="row"><button class="no" name="decision" value="deny" type="submit">Cancelar</button><button class="go" name="decision" value="allow" type="submit">Autorizar</button></div></form>`;
     sendHtml(res, problem ? 401 : 200, page('Autorizar acceso', inner), new URL(ar.redirectUri).origin);
@@ -452,7 +463,7 @@ ${problem ? `<p class="err">${escapeHtml(problem)}</p>` : ''}
     return `Bearer ${parts.join(', ')}`;
   }
 
-  return { config: { enabled: true }, router, checkBearer, challenge };
+  return { config: { enabled: true, source: config.source }, router, checkBearer, challenge };
 }
 
 /** True when the request goes to the MCP forwarder (and nowhere else once paths are resolved). */
@@ -467,7 +478,7 @@ function isMcpRequest(req) {
 function tryCreateOAuth(options) {
   try {
     const oauth = createOAuth(options);
-    options.logger.info({ msg: 'mcp_oauth', enabled: Boolean(oauth) });
+    options.logger.info({ msg: 'mcp_oauth', enabled: Boolean(oauth), source: oauth ? oauth.config.source : undefined });
     return oauth;
   } catch (err) {
     options.logger.error({ msg: 'mcp_oauth_disabled', name: err && err.name, reason: err instanceof OAuthConfigError ? err.message : undefined });

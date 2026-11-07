@@ -507,7 +507,7 @@ es **la distancia de red** entre Muse y la región del proxy:
 
 ## Conector de Claude (OAuth en /mcp/)
 
-Los conectores personalizados de Claude no pueden mandar `X-Proxy-Key`, así que `/mcp/` también acepta un token OAuth 2.1. Es opcional: sin `MCP_OAUTH_PASSWORD`, todo funciona igual que antes y solo vale `X-Proxy-Key`.
+Los conectores personalizados de Claude no pueden mandar `X-Proxy-Key`, así que `/mcp/` también acepta un token OAuth 2.1. Para autorizar un conector se usa `MCP_OAUTH_PASSWORD` o, si no existe, el `ADMIN_PIN` del panel. Sin ninguna de las dos, todo funciona igual que antes y solo vale `X-Proxy-Key`. Cambiar la que esté en uso revoca todos los tokens.
 
 **Activarlo**
 

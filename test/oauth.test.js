@@ -78,7 +78,16 @@ async function fullFlow(url, { registerBody, password = PASSWORD } = {}) {
   return { reg, answer, location, code, verifier, tokenBody, token };
 }
 
-test('without MCP_OAUTH_PASSWORD the module is off and /mcp/ behaves as before', async (t) => {
+test('without MCP_OAUTH_PASSWORD the dashboard PIN authorizes connectors', async () => {
+  const logger = silentLogger();
+  const config = loadConfig({ GHL_TOKEN: TOKEN, PROXY_KEY: KEY, ADMIN_PIN: '73915482' });
+  const oauth = tryCreateOAuth({ env: {}, ghlConfig: config, logger });
+  assert.ok(oauth);
+  assert.equal(oauth.config.source, 'admin_pin');
+  assert.ok(!JSON.stringify(logger.lines).includes('73915482'));
+});
+
+test('without MCP_OAUTH_PASSWORD or ADMIN_PIN the module is off and /mcp/ behaves as before', async (t) => {
   const { url } = await setup(t, { env: {} });
   const meta = await request(`${url}/.well-known/oauth-protected-resource`);
   assert.equal(meta.status, 401);
@@ -279,4 +288,25 @@ test('too many wrong passwords are throttled', async (t) => {
   assert.match(last.text, /Demasiados intentos/);
   const right = await request(`${url}/oauth/authorize`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ ...params, password: PASSWORD }) });
   assert.equal(right.status, 401);
+});
+
+test('full flow with the dashboard PIN as the owner secret', async (t) => {
+  const upstream = await startUpstream();
+  const logger = silentLogger();
+  const config = loadConfig({ GHL_TOKEN: TOKEN, PROXY_KEY: KEY, GHL_BASE_URL: upstream.url, ADMIN_PIN: '73915482' });
+  const oauth = tryCreateOAuth({ env: {}, ghlConfig: config, logger });
+  const app = createApp(config, logger, { oauth });
+  const server = http.createServer(app);
+  const url = await listen(server);
+  t.after(async () => {
+    app.locals.limiter.stop();
+    await close(server);
+    await upstream.close();
+  });
+  const consentPage = await request(`${url}/oauth/authorize?${form({ response_type: 'code', client_id: json(await register(url)).client_id, redirect_uri: REDIRECT, code_challenge: pkce().challenge, code_challenge_method: 'S256' })}`);
+  assert.match(consentPage.text, /PIN del panel/);
+  const flow = await fullFlow(url, { password: '73915482' });
+  assert.equal(flow.token.status, 200);
+  const call = await request(`${url}/mcp/`, { method: 'POST', headers: { Authorization: `Bearer ${json(flow.token).access_token}` }, body: '{}' });
+  assert.equal(call.status, 200);
 });
