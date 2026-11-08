@@ -269,7 +269,7 @@ test('live checks: token, proxy REST/MCP like Muse, auth, permissions and speed'
   assert.equal(byId.auth.status, 'ok');
   assert.equal(byId.proxy_mcp.status, 'ok');
   // 3 from GHL + the proxy's own Eximia invoice tools
-  assert.match(byId.proxy_mcp.detail, /7 herramientas/);
+  assert.match(byId.proxy_mcp.detail, /10 herramientas/);
   assert.equal(r.overall, 'warn');
 
   const perms = Object.fromEntries(r.permissions.map((p) => [p.id, p]));

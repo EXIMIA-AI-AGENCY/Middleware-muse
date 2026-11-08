@@ -94,7 +94,7 @@ const TOOLS = [
     annotations: { destructiveHint: true, openWorldHint: true },
   },
 ];
-// Eximia sub-account tools that GHL's MCP lacks (invoices). They use GHL_TOKEN and GHL_LOCATION_ID,
+// Eximia sub-account tools that GHL's MCP lacks (invoices, contact notes). They use GHL_TOKEN and GHL_LOCATION_ID,
 // like /ghl, so they work with or without the agency token.
 // Verified against GHL (README, Notas para Muse): invoices answer to the proxy default.
 const INVOICES_VERSION = '2021-07-28';
@@ -129,6 +129,29 @@ const EXIMIA_TOOLS = [
     annotations: { destructiveHint: true, readOnlyHint: false },
   },
 ];
+EXIMIA_TOOLS.push(
+  {
+    name: 'eximia_list-contact-notes',
+    title: 'Eximia: notas de un contacto',
+    description: 'Lista las notas de un contacto de la subcuenta Eximia por su contactId.',
+    inputSchema: obj({ contactId: str('ID del contacto') }, ['contactId']),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_get-contact-note',
+    title: 'Eximia: ver una nota',
+    description: 'Una nota de un contacto de la subcuenta Eximia por contactId y noteId.',
+    inputSchema: obj({ contactId: str('ID del contacto'), noteId: str('ID de la nota') }, ['contactId', 'noteId']),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_create-contact-note',
+    title: 'Eximia: crear una nota',
+    description: 'Crea una nota nueva en un contacto de la subcuenta Eximia. No edita ni borra notas existentes.',
+    inputSchema: obj({ contactId: str('ID del contacto'), body: str('Texto de la nota'), title: str('Título (opcional)'), pinned: { type: 'boolean', description: 'Fijarla arriba (opcional)' } }, ['contactId', 'body']),
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+);
 const AGENCY_NAMES = new Set(TOOLS.map((t) => t.name));
 const EXIMIA_NAMES = new Set(EXIMIA_TOOLS.map((t) => t.name));
 
@@ -314,6 +337,26 @@ function createAgencyMcp({ agencyConfig = null, ghlConfig, logger }) {
       case 'eximia_get-invoice-schedule': {
         if (typeof a.scheduleId !== 'string' || !ID.test(a.scheduleId)) return [{ error: 'scheduleId inválido' }, true];
         const r = await call({ token, method: 'GET', path: `/invoices/schedule/${encodeURIComponent(a.scheduleId)}`, query: loc(), version });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_list-contact-notes': {
+        if (typeof a.contactId !== 'string' || !ID.test(a.contactId)) return [{ error: 'contactId inválido' }, true];
+        const r = await call({ token, method: 'GET', path: `/contacts/${encodeURIComponent(a.contactId)}/notes`, version: ghlConfig.ghlVersion });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_get-contact-note': {
+        if (typeof a.contactId !== 'string' || !ID.test(a.contactId)) return [{ error: 'contactId inválido' }, true];
+        if (typeof a.noteId !== 'string' || !ID.test(a.noteId)) return [{ error: 'noteId inválido' }, true];
+        const r = await call({ token, method: 'GET', path: `/contacts/${encodeURIComponent(a.contactId)}/notes/${encodeURIComponent(a.noteId)}`, version: ghlConfig.ghlVersion });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_create-contact-note': {
+        if (typeof a.contactId !== 'string' || !ID.test(a.contactId)) return [{ error: 'contactId inválido' }, true];
+        if (typeof a.body !== 'string' || !a.body.trim() || a.body.length > 50_000) return [{ error: 'body es obligatorio (máximo 50000 caracteres)' }, true];
+        const note = { body: a.body };
+        if (typeof a.title === 'string' && a.title) note.title = a.title.slice(0, 200);
+        if (typeof a.pinned === 'boolean') note.pinned = a.pinned;
+        const r = await call({ token, method: 'POST', path: `/contacts/${encodeURIComponent(a.contactId)}/notes`, body: note, version: ghlConfig.ghlVersion });
         return [out(r), r.status >= 400];
       }
       case 'eximia_cancel-invoice-schedule': {

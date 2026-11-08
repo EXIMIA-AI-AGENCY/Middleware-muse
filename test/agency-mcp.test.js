@@ -44,6 +44,12 @@ async function startFakeGhl({ locationTokenOk = true } = {}) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         return res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`);
       }
+      if (auth === `Bearer ${TOKEN}` && /^\/contacts\/[^/]+\/notes/.test(path)) {
+        if (req.method === 'GET' && path === '/contacts/H7XwsF412dsx6REHsn0a/notes') return json(200, { notes: [{ id: 'note000001', body: 'hola' }] });
+        if (req.method === 'GET' && path === '/contacts/H7XwsF412dsx6REHsn0a/notes/note000001') return json(200, { note: { id: 'note000001', body: 'hola' } });
+        if (req.method === 'POST' && path === '/contacts/H7XwsF412dsx6REHsn0a/notes') return json(201, { note: { id: 'note000002', ...JSON.parse(body) } });
+        return json(404, {});
+      }
       if (auth === `Bearer ${TOKEN}` && path.startsWith('/invoices')) {
         if (req.method === 'GET' && path === '/invoices/') return json(200, { invoices: [{ _id: 'inv1' }], total: 1 });
         if (req.method === 'GET' && path === '/invoices/schedule') return json(200, { schedules: [{ _id: 'sched000001' }, { _id: 'sched000002' }], total: 2 });
@@ -231,4 +237,24 @@ test('agency tools never leak the agency token in results', async (t) => {
   assert.ok(!JSON.stringify(msg).includes(AGENCY_TOKEN));
   const sub = await rpc(url, 'tools/call', { name: 'agency_sub-account-request', arguments: { locationId: OTHER, method: 'GET', path: '/contacts/' } });
   assert.ok(!JSON.stringify(sub.msg).includes(LOCATION_TOKEN));
+});
+
+test('Eximia contact notes: list, get, create (no edit or delete)', async (t) => {
+  const { url, ghl } = await setup(t, { agency: false });
+  const C = 'H7XwsF412dsx6REHsn0a';
+  const list = await callTool(url, 'eximia_list-contact-notes', { contactId: C });
+  assert.equal(list.data.body.notes[0].id, 'note000001');
+  assert.equal(ghl.requests.at(-1).headers.authorization, `Bearer ${TOKEN}`);
+  assert.equal(ghl.requests.at(-1).headers.version, '2021-07-28');
+  const one = await callTool(url, 'eximia_get-contact-note', { contactId: C, noteId: 'note000001' });
+  assert.equal(one.data.body.note.body, 'hola');
+  const made = await callTool(url, 'eximia_create-contact-note', { contactId: C, body: 'Mensaje para el buzón', title: 'Buzón', extra: 'ignored' });
+  assert.equal(made.isError, false);
+  assert.deepEqual(JSON.parse(ghl.requests.at(-1).body), { body: 'Mensaje para el buzón', title: 'Buzón' });
+  const before = ghl.requests.length;
+  assert.equal((await callTool(url, 'eximia_create-contact-note', { contactId: C, body: '  ' })).isError, true);
+  assert.equal((await callTool(url, 'eximia_list-contact-notes', { contactId: '../x' })).isError, true);
+  assert.equal(ghl.requests.length, before);
+  const names = (await rpc(url, 'tools/list', {})).msg.result.tools.map((x) => x.name);
+  assert.ok(!names.some((n) => /note/.test(n) && /(update|delete|edit)/.test(n)));
 });
