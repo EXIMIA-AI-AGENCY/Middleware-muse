@@ -96,7 +96,8 @@ const TOOLS = [
 ];
 // Eximia sub-account tools that GHL's MCP lacks (invoices). They use GHL_TOKEN and GHL_LOCATION_ID,
 // like /ghl, so they work with or without the agency token.
-const INVOICES_VERSION = '2021-04-15';
+// Verified against GHL (README, Notas para Muse): invoices answer to the proxy default.
+const INVOICES_VERSION = '2021-07-28';
 const EXIMIA_TOOLS = [
   {
     name: 'eximia_list-invoices',

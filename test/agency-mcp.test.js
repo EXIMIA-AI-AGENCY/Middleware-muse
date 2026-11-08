@@ -145,7 +145,7 @@ test('Eximia invoice tools use the Eximia token and location; cancel needs confi
   assert.equal(q.get('limit'), '5');
   assert.equal(q.get('status'), 'sent');
   assert.equal(seen.headers.authorization, `Bearer ${TOKEN}`);
-  assert.equal(seen.headers.version, '2021-04-15');
+  assert.equal(seen.headers.version, '2021-07-28');
 
   const schedules = await callTool(url, 'eximia_list-invoice-schedules', {});
   assert.equal(schedules.data.body.schedules.length, 2);
