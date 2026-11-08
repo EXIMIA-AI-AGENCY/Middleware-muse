@@ -1,7 +1,8 @@
 'use strict';
 
 /**
- * Agency tools on the same /mcp/ endpoint (so one Claude connector sees both levels).
+ * Extra tools on the same /mcp/ endpoint (so one Claude connector sees everything):
+ * Eximia invoice tools (always, with GHL_TOKEN) and agency tools (only with GHL_AGENCY_TOKEN).
  *
  * GHL's hosted MCP only knows the Eximia sub-account. When the agency API is configured
  * (GHL_AGENCY_TOKEN), this middleware sits in front of the /mcp forwarder and:
@@ -93,7 +94,42 @@ const TOOLS = [
     annotations: { destructiveHint: true, openWorldHint: true },
   },
 ];
-const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
+// Eximia sub-account tools that GHL's MCP lacks (invoices). They use GHL_TOKEN and GHL_LOCATION_ID,
+// like /ghl, so they work with or without the agency token.
+const INVOICES_VERSION = '2021-04-15';
+const EXIMIA_TOOLS = [
+  {
+    name: 'eximia_list-invoices',
+    title: 'Eximia: listar facturas',
+    description: 'Lista las facturas de la subcuenta Eximia. Filtros opcionales: status, search (ID, nombre, email o teléfono), contactId, startAt/endAt (YYYY-MM-DD). Paginación con limit/offset.',
+    inputSchema: obj({ status: str('Estado (opcional)'), search: str('Buscar (opcional)'), contactId: str('Contacto (opcional)'), startAt: str('Desde YYYY-MM-DD (opcional)'), endAt: str('Hasta YYYY-MM-DD (opcional)'), limit: int('Máximo (1-100, por defecto 50)'), offset: int('Cuántas saltar') }),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_list-invoice-schedules',
+    title: 'Eximia: listar facturas recurrentes',
+    description: 'Lista los schedules de facturas recurrentes de la subcuenta Eximia. Filtros opcionales: status, search. Paginación con limit/offset.',
+    inputSchema: obj({ status: str('Estado (opcional)'), search: str('Buscar (opcional)'), limit: int('Máximo (1-100, por defecto 50)'), offset: int('Cuántos saltar') }),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_get-invoice-schedule',
+    title: 'Eximia: ver una factura recurrente',
+    description: 'Detalle de un schedule de factura recurrente de la subcuenta Eximia por su scheduleId.',
+    inputSchema: obj({ scheduleId: str('ID del schedule') }, ['scheduleId']),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_cancel-invoice-schedule',
+    title: 'Eximia: cancelar una factura recurrente',
+    description:
+      'Cancela un schedule de factura recurrente de la subcuenta Eximia: deja de facturarle al cliente. NUNCA lo uses por tu cuenta: antes enséñale al usuario cuál es (cliente, monto, frecuencia, scheduleId) con eximia_get-invoice-schedule y espera su sí explícito para ESE schedule. Solo entonces llama con confirmedByUser true.',
+    inputSchema: obj({ scheduleId: str('ID del schedule'), confirmedByUser: { type: 'boolean', description: 'true solo si el usuario dijo que sí a cancelar este schedule' } }, ['scheduleId', 'confirmedByUser']),
+    annotations: { destructiveHint: true, readOnlyHint: false },
+  },
+];
+const AGENCY_NAMES = new Set(TOOLS.map((t) => t.name));
+const EXIMIA_NAMES = new Set(EXIMIA_TOOLS.map((t) => t.name));
 
 const ID = /^[A-Za-z0-9_-]{4,64}$/;
 
@@ -143,10 +179,13 @@ function toolResult(id, payload, isError = false) {
   return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError } };
 }
 
-function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
+function createAgencyMcp({ agencyConfig = null, ghlConfig, logger }) {
   const base = ghlConfig.upstreamBase;
   const transport = base.protocol === 'https:' ? https : http;
-  let companyId = agencyConfig.companyId || null;
+  const agencyOn = Boolean(agencyConfig && agencyConfig.enabled);
+  const extraTools = [...(agencyOn ? TOOLS : []), ...EXIMIA_TOOLS];
+  const handles = (name) => EXIMIA_NAMES.has(name) || (agencyOn && AGENCY_NAMES.has(name));
+  let companyId = (agencyConfig && agencyConfig.companyId) || null;
   const locationTokens = new Map(); // locationId -> { token, exp }
 
   /** One buffered call to GHL. Never logs tokens or bodies. */
@@ -253,8 +292,46 @@ function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
 
   const out = (r) => ({ status: r.status, body: r.body });
 
+  const clampInt = (v, def, min, max) => Math.min(Math.max(Number.parseInt(v, 10) || def, min), max);
+  const loc = () => ({ altId: ghlConfig.ghlLocationId, altType: 'location' });
+  const optStr = (v) => (typeof v === 'string' && v.length > 0 && v.length <= 200 ? v : undefined);
+
+  async function runEximiaTool(name, a) {
+    const token = ghlConfig.ghlToken;
+    const version = INVOICES_VERSION;
+    switch (name) {
+      case 'eximia_list-invoices': {
+        const query = { ...loc(), limit: clampInt(a.limit, 50, 1, 100), offset: clampInt(a.offset, 0, 0, 1_000_000), status: optStr(a.status), search: optStr(a.search), contactId: optStr(a.contactId), startAt: optStr(a.startAt), endAt: optStr(a.endAt) };
+        const r = await call({ token, method: 'GET', path: '/invoices/', query, version });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_list-invoice-schedules': {
+        const query = { ...loc(), limit: clampInt(a.limit, 50, 1, 100), offset: clampInt(a.offset, 0, 0, 1_000_000), status: optStr(a.status), search: optStr(a.search) };
+        const r = await call({ token, method: 'GET', path: '/invoices/schedule', query, version });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_get-invoice-schedule': {
+        if (typeof a.scheduleId !== 'string' || !ID.test(a.scheduleId)) return [{ error: 'scheduleId inválido' }, true];
+        const r = await call({ token, method: 'GET', path: `/invoices/schedule/${encodeURIComponent(a.scheduleId)}`, query: loc(), version });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_cancel-invoice-schedule': {
+        if (typeof a.scheduleId !== 'string' || !ID.test(a.scheduleId)) return [{ error: 'scheduleId inválido' }, true];
+        if (a.confirmedByUser !== true) {
+          return [{ error: 'not_confirmed', message: 'No se canceló nada. Enséñale al usuario el schedule y espera su sí explícito antes de cancelarlo.' }, true];
+        }
+        logger.warn({ msg: 'eximia_invoice_schedule_cancel' });
+        const r = await call({ token, method: 'POST', path: `/invoices/schedule/${encodeURIComponent(a.scheduleId)}/cancel`, body: loc(), version });
+        return [out(r), r.status >= 400];
+      }
+      default:
+        return [{ error: 'unknown tool' }, true];
+    }
+  }
+
   async function runTool(name, args) {
     const a = args && typeof args === 'object' ? args : {};
+    if (EXIMIA_NAMES.has(name)) return runEximiaTool(name, a);
     const agencyToken = agencyConfig.token;
     switch (name) {
       case 'agency_get-company': {
@@ -338,7 +415,7 @@ function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
         const accept = String(req.headers.accept || '');
         const sse = /text\/event-stream/i.test(accept) || !/application\/json/i.test(accept);
 
-        if (msg.method === 'tools/call' && msg.params && TOOL_NAMES.has(msg.params.name)) {
+        if (msg.method === 'tools/call' && msg.params && handles(msg.params.name)) {
           try {
             const [payload, isError] = await runTool(msg.params.name, msg.params.arguments);
             logger.info({ msg: 'agency_mcp_tool', tool: msg.params.name, error: Boolean(isError) });
@@ -359,7 +436,7 @@ function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
               (upRes) => {
                 const chunks = [];
                 upRes.on('data', (c) => chunks.push(c));
-                upRes.on('end', () => resolve({ status: upRes.statusCode, type: upRes.headers['content-type'], text: Buffer.concat(chunks).toString('utf8') }));
+                upRes.on('end', () => resolve({ status: upRes.statusCode, type: upRes.headers['content-type'], session: upRes.headers['mcp-session-id'], text: Buffer.concat(chunks).toString('utf8') }));
                 upRes.on('error', () => resolve(null));
               },
             );
@@ -374,10 +451,13 @@ function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
             parsed = null;
           }
           if (parsed && parsed.result && Array.isArray(parsed.result.tools)) {
-            parsed.result.tools = [...parsed.result.tools, ...TOOLS];
-            return sendRpc(res, parsed, { sse: /text\/event-stream/i.test(up.type || '') });
+            parsed.result.tools = [...parsed.result.tools, ...extraTools];
+            const keep = up.session ? { 'Mcp-Session-Id': up.session } : {};
+            logger.info({ msg: 'mcp_tools_list', added: extraTools.length });
+            return sendRpc(res, parsed, { sse: /text\/event-stream/i.test(up.type || ''), headers: keep });
           }
           if (up) {
+            logger.warn({ msg: 'mcp_tools_list_passthrough', status: up.status });
             // GHL error or unexpected shape: relay what it said, unchanged.
             res.writeHead(up.status, { 'Content-Type': up.type || 'application/json', 'Cache-Control': 'no-store' });
             return res.end(up.text);
@@ -394,4 +474,4 @@ function createAgencyMcp({ agencyConfig, ghlConfig, logger }) {
   };
 }
 
-module.exports = { createAgencyMcp, AGENCY_TOOLS: TOOLS, parseMcpBody };
+module.exports = { createAgencyMcp, AGENCY_TOOLS: TOOLS, EXIMIA_TOOLS, parseMcpBody };

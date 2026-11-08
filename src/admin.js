@@ -179,7 +179,7 @@ ${Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n')}
 3. Verifica, en este orden:
    a. \`GET ${info.health_url}\` → \`{"ok": true, ...}\`
    b. \`GET ${base}${info.rest_base_path}/contacts/?locationId=${loc}&limit=1\` con \`X-Proxy-Key\` → 200 con \`"contacts"\`.
-   c. MCP: \`initialize\` → \`tools/list\` (unas 36 herramientas) → \`tools/call\` de \`locations_get-location\` → \`result.isError\` debe ser false.
+   c. MCP: \`initialize\` → \`tools/list\` (unas 40 herramientas, más las de agencia si está configurada) → \`tools/call\` de \`locations_get-location\` → \`result.isError\` debe ser false.
 4. Si todo da 200, pasa tus automatizaciones (revisión diaria del CRM, greeter de leads, prospección) al proxy y déjalo como vía principal hasta que el conector directo vuelva a funcionar.
 5. Confírmame en una línea que quedó conectado.
 

@@ -87,10 +87,9 @@ function createApp(config, logger, { adminOptions = {}, kraken = null, agency = 
   app.use(rateLimitByKey(limiter));
 
   app.use('/ghl', createForwarder(config, logger, { kind: 'rest', pathPrefix: '' }));
-  // With the agency token configured, the same /mcp/ also lists and answers the agency tools.
-  if (agency && agency.config.enabled) {
-    app.use('/mcp', createAgencyMcp({ agencyConfig: agency.config, ghlConfig: config, logger }));
-  }
+  // The same /mcp/ also lists and answers the proxy's own tools: Eximia invoices always, and
+  // the agency tools when the agency token is configured.
+  app.use('/mcp', createAgencyMcp({ agencyConfig: agency && agency.config.enabled ? agency.config : null, ghlConfig: config, logger }));
   app.use('/mcp', createForwarder(config, logger, { kind: 'mcp', pathPrefix: '/mcp' }));
 
   app.use((req, res) => {

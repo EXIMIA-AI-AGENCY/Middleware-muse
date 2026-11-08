@@ -7,7 +7,7 @@ const { TOKEN, KEY, request, authed, listen, close } = require('./helpers');
 const { createApp } = require('../src/create-app');
 const { loadConfig } = require('../src/config');
 const { tryCreateAgency } = require('../src/agency');
-const { AGENCY_TOOLS } = require('../src/agency/mcp-tools');
+const { AGENCY_TOOLS, EXIMIA_TOOLS } = require('../src/agency/mcp-tools');
 
 const AGENCY_TOKEN = 'pit-agency-0123456789abcdef-0123456789abcdef';
 const LOC = 'L3bLLVwvhdJ7A9WqkPxM';
@@ -43,6 +43,13 @@ async function startFakeGhl({ locationTokenOk = true } = {}) {
               : {};
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         return res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n\n`);
+      }
+      if (auth === `Bearer ${TOKEN}` && path.startsWith('/invoices')) {
+        if (req.method === 'GET' && path === '/invoices/') return json(200, { invoices: [{ _id: 'inv1' }], total: 1 });
+        if (req.method === 'GET' && path === '/invoices/schedule') return json(200, { schedules: [{ _id: 'sched000001' }, { _id: 'sched000002' }], total: 2 });
+        if (req.method === 'GET' && path === '/invoices/schedule/sched000001') return json(200, { schedule: { _id: 'sched000001', name: 'Plan mensual' } });
+        if (req.method === 'POST' && path === '/invoices/schedule/sched000001/cancel') return json(200, { _id: 'sched000001', status: 'cancelled' });
+        return json(404, {});
       }
       if (auth === `Bearer ${LOCATION_TOKEN}`) {
         if (path === '/contacts/') return json(200, { contacts: [{ id: 'c1' }], location: new URL(req.url, 'http://x').searchParams.get('locationId') });
@@ -117,10 +124,48 @@ test('tools/list = GHL sub-account tools + agency tools; other calls still go to
   assert.equal(JSON.parse(ghl.requests.at(-1).body).params.name, 'contacts_get-contacts');
 });
 
-test('without the agency token /mcp/ is exactly the GHL MCP', async (t) => {
+test('without the agency token /mcp/ lists GHL tools plus the Eximia invoice tools only', async (t) => {
   const { url } = await setup(t, { agency: false });
   const list = await rpc(url, 'tools/list', {});
-  assert.deepEqual(list.msg.result.tools.map((x) => x.name), ['contacts_get-contacts']);
+  assert.deepEqual(list.msg.result.tools.map((x) => x.name), ['contacts_get-contacts', ...EXIMIA_TOOLS.map((x) => x.name)]);
+  const r = await rpc(url, 'tools/call', { name: 'agency_list-sub-accounts', arguments: {} }, 2);
+  // not ours without the agency token: it goes to GHL like any other tool
+  assert.equal(r.msg.result.content[0].text, '{"contacts":[]}');
+});
+
+test('Eximia invoice tools use the Eximia token and location; cancel needs confirmedByUser', async (t) => {
+  const { url, ghl } = await setup(t, { agency: false });
+  const list = await callTool(url, 'eximia_list-invoices', { limit: 5, status: 'sent' });
+  assert.equal(list.isError, false);
+  let seen = ghl.requests.at(-1);
+  const q = new URL(seen.url, 'http://x').searchParams;
+  assert.equal(new URL(seen.url, 'http://x').pathname, '/invoices/');
+  assert.equal(q.get('altId'), LOC);
+  assert.equal(q.get('altType'), 'location');
+  assert.equal(q.get('limit'), '5');
+  assert.equal(q.get('status'), 'sent');
+  assert.equal(seen.headers.authorization, `Bearer ${TOKEN}`);
+  assert.equal(seen.headers.version, '2021-04-15');
+
+  const schedules = await callTool(url, 'eximia_list-invoice-schedules', {});
+  assert.equal(schedules.data.body.schedules.length, 2);
+  const one = await callTool(url, 'eximia_get-invoice-schedule', { scheduleId: 'sched000001' });
+  assert.equal(one.data.body.schedule._id, 'sched000001');
+
+  const before = ghl.requests.length;
+  const notConfirmed = await callTool(url, 'eximia_cancel-invoice-schedule', { scheduleId: 'sched000001' });
+  assert.equal(notConfirmed.isError, true);
+  assert.equal(notConfirmed.data.error, 'not_confirmed');
+  const bad = await callTool(url, 'eximia_cancel-invoice-schedule', { scheduleId: '../../x', confirmedByUser: true });
+  assert.equal(bad.isError, true);
+  assert.equal(ghl.requests.length, before);
+
+  const done = await callTool(url, 'eximia_cancel-invoice-schedule', { scheduleId: 'sched000001', confirmedByUser: true });
+  assert.equal(done.isError, false);
+  seen = ghl.requests.at(-1);
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.url, '/invoices/schedule/sched000001/cancel');
+  assert.deepEqual(JSON.parse(seen.body), { altId: LOC, altType: 'location' });
 });
 
 test('agency tools: company, sub-accounts, one sub-account', async (t) => {
