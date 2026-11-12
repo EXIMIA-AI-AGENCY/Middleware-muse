@@ -50,6 +50,10 @@ async function startFakeGhl({ locationTokenOk = true } = {}) {
         if (req.method === 'POST' && path === '/contacts/H7XwsF412dsx6REHsn0a/notes') return json(201, { note: { id: 'note000002', ...JSON.parse(body) } });
         return json(404, {});
       }
+      if (auth === `Bearer ${TOKEN}` && path === '/users/') return json(200, { users: [{ id: 'user000001', name: 'Alan', email: 'a@b.c', roles: { role: 'admin' } }] });
+      if (auth === `Bearer ${TOKEN}` && path === `/locations/${LOC}`) return json(200, { location: { id: LOC, name: 'Eximia', phone: '+10000000000', website: 'eximiahq.com', business: { name: 'Eximia', logoUrl: 'https://x/logo.png' } } });
+      if (auth === `Bearer ${TOKEN}` && req.method === 'POST' && path === '/invoices/') return json(200, { _id: 'inv000002', status: 'draft', got: JSON.parse(body) });
+      if (auth === `Bearer ${TOKEN}` && req.method === 'POST' && path === '/invoices/inv000002/send') return json(200, { invoice: { _id: 'inv000002', status: 'sent' }, got: JSON.parse(body) });
       if (auth === `Bearer ${TOKEN}` && path.startsWith('/invoices')) {
         if (req.method === 'GET' && path === '/invoices/') return json(200, { invoices: [{ _id: 'inv1' }], total: 1 });
         if (req.method === 'GET' && path === '/invoices/schedule') return json(200, { schedules: [{ _id: 'sched000001' }, { _id: 'sched000002' }], total: 2 });
@@ -257,4 +261,44 @@ test('Eximia contact notes: list, get, create (no edit or delete)', async (t) =>
   assert.equal(ghl.requests.length, before);
   const names = (await rpc(url, 'tools/list', {})).msg.result.tools.map((x) => x.name);
   assert.ok(!names.some((n) => /note/.test(n) && /(update|delete|edit)/.test(n)));
+});
+
+test('Eximia create and send invoice: both need confirmedByUser; body built from the location', async (t) => {
+  const { url, ghl } = await setup(t, { agency: false });
+  const users = await callTool(url, 'eximia_list-users', {});
+  assert.equal(users.data.users[0].id, 'user000001');
+
+  const args = { contactId: 'contact00001', contactName: 'Cliente Prueba', contactEmail: 'cliente@example.com', name: 'Servicios noviembre', items: [{ name: 'CRM', amount: 297, qty: 1 }], issueDate: '2026-11-12', dueDate: '2026-11-19' };
+  const before = ghl.requests.length;
+  const no = await callTool(url, 'eximia_create-invoice', args);
+  assert.equal(no.data.error, 'not_confirmed');
+  const noSend = await callTool(url, 'eximia_send-invoice', { invoiceId: 'inv000002', userId: 'user000001' });
+  assert.equal(noSend.data.error, 'not_confirmed');
+  for (const bad of [{ ...args, contactEmail: 'nope' }, { ...args, items: [] }, { ...args, items: [{ name: 'x', amount: -1, qty: 1 }] }, { ...args, issueDate: '12/11/2026' }]) {
+    assert.equal((await callTool(url, 'eximia_create-invoice', { ...bad, confirmedByUser: true })).isError, true);
+  }
+  assert.equal(ghl.requests.length, before);
+
+  const made = await callTool(url, 'eximia_create-invoice', { ...args, confirmedByUser: true });
+  assert.equal(made.isError, false);
+  const sent = JSON.parse(ghl.requests.at(-1).body);
+  assert.equal(ghl.requests.at(-1).headers.version, '2021-04-15');
+  assert.equal(ghl.requests.at(-1).headers.authorization, `Bearer ${TOKEN}`);
+  assert.equal(sent.altId, LOC);
+  assert.equal(sent.altType, 'location');
+  assert.equal(sent.currency, 'USD');
+  assert.deepEqual(sent.items, [{ name: 'CRM', currency: 'USD', amount: 297, qty: 1, type: 'one_time' }]);
+  assert.deepEqual(sent.discount, { type: 'percentage', value: 0 });
+  assert.equal(sent.businessDetails.name, 'Eximia');
+  assert.equal(sent.businessDetails.logoUrl, 'https://x/logo.png');
+  assert.deepEqual(sent.contactDetails, { id: 'contact00001', name: 'Cliente Prueba', email: 'cliente@example.com', phoneNo: '' });
+  assert.deepEqual(sent.sentTo, { email: ['cliente@example.com'] });
+  assert.equal(sent.issueDate, '2026-11-12');
+  assert.equal(sent.dueDate, '2026-11-19');
+  assert.equal(sent.liveMode, true);
+
+  const send = await callTool(url, 'eximia_send-invoice', { invoiceId: 'inv000002', userId: 'user000001', confirmedByUser: true });
+  assert.equal(send.isError, false);
+  assert.deepEqual(JSON.parse(ghl.requests.at(-1).body), { altId: LOC, altType: 'location', userId: 'user000001', action: 'email', liveMode: true });
+  assert.equal(ghl.requests.at(-1).url, '/invoices/inv000002/send');
 });

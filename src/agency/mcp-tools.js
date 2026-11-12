@@ -98,6 +98,11 @@ const TOOLS = [
 // like /ghl, so they work with or without the agency token.
 // Verified against GHL (README, Notas para Muse): invoices answer to the proxy default.
 const INVOICES_VERSION = '2021-07-28';
+// GHL documents create and send with Version 2021-04-15 only.
+const WRITE_INVOICES_VERSION = '2021-04-15';
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const todayPr = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Puerto_Rico' }).format(new Date());
 const EXIMIA_TOOLS = [
   {
     name: 'eximia_list-invoices',
@@ -130,6 +135,64 @@ const EXIMIA_TOOLS = [
   },
 ];
 EXIMIA_TOOLS.push(
+  {
+    name: 'eximia_list-users',
+    title: 'Eximia: usuarios de la subcuenta',
+    description: 'Lista los usuarios de la subcuenta Eximia (id, nombre, email). Sirve para escoger el userId que envía un invoice.',
+    inputSchema: obj({}),
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'eximia_create-invoice',
+    title: 'Eximia: crear un invoice (borrador)',
+    description:
+      'Crea un invoice en BORRADOR en la subcuenta Eximia (no lo envía). NUNCA lo uses por tu cuenta: antes enséñale al usuario el cliente, cada línea (nombre, cantidad, precio), la moneda, las fechas y el total, y espera su sí explícito para ESE invoice. Solo entonces llama con confirmedByUser true. Para enviarlo después usa eximia_send-invoice.',
+    inputSchema: obj(
+      {
+        contactId: str('ID del contacto en GHL'),
+        contactName: str('Nombre del contacto'),
+        contactEmail: str('Email del contacto'),
+        contactPhone: str('Teléfono del contacto (opcional)'),
+        companyName: str('Empresa del contacto (opcional)'),
+        name: str('Nombre del invoice'),
+        title: str('Título que ve el cliente (opcional, por defecto INVOICE)'),
+        currency: str('Moneda, por defecto USD'),
+        items: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          description: 'Líneas del invoice',
+          items: obj({ name: str('Nombre'), description: str('Descripción (opcional)'), amount: { type: 'number', description: 'Precio unitario' }, qty: { type: 'number', description: 'Cantidad' } }, ['name', 'amount', 'qty']),
+        },
+        issueDate: str('Fecha de emisión YYYY-MM-DD (por defecto hoy en Puerto Rico)'),
+        dueDate: str('Fecha de vencimiento YYYY-MM-DD (opcional)'),
+        termsNotes: str('Términos o notas (opcional)'),
+        discountType: { type: 'string', enum: ['percentage', 'fixed'], description: 'Tipo de descuento (opcional)' },
+        discountValue: { type: 'number', description: 'Valor del descuento (opcional, por defecto 0)' },
+        liveMode: { type: 'boolean', description: 'false para modo prueba; por defecto true' },
+        confirmedByUser: { type: 'boolean', description: 'true solo si el usuario dijo que sí a crear ESTE invoice' },
+      },
+      ['contactId', 'contactName', 'contactEmail', 'name', 'items', 'confirmedByUser'],
+    ),
+    annotations: { destructiveHint: false, readOnlyHint: false, openWorldHint: true },
+  },
+  {
+    name: 'eximia_send-invoice',
+    title: 'Eximia: enviar un invoice',
+    description:
+      'Envía al cliente un invoice ya creado de la subcuenta Eximia (le llega por email, SMS o ambos). NUNCA lo uses por tu cuenta: antes enséñale al usuario a quién va, por qué vía y el total, y espera su sí explícito para enviar ESE invoice. Solo entonces llama con confirmedByUser true. userId es quien lo envía (sácalo de eximia_list-users).',
+    inputSchema: obj(
+      {
+        invoiceId: str('ID del invoice'),
+        userId: str('ID del usuario de Eximia que lo envía'),
+        action: { type: 'string', enum: ['email', 'sms', 'sms_and_email', 'send_manually'], description: 'Vía de envío, por defecto email' },
+        liveMode: { type: 'boolean', description: 'false para modo prueba; por defecto true' },
+        confirmedByUser: { type: 'boolean', description: 'true solo si el usuario dijo que sí a enviar ESTE invoice' },
+      },
+      ['invoiceId', 'userId', 'confirmedByUser'],
+    ),
+    annotations: { destructiveHint: true, readOnlyHint: false, openWorldHint: true },
+  },
   {
     name: 'eximia_list-contact-notes',
     title: 'Eximia: notas de un contacto',
@@ -357,6 +420,72 @@ function createAgencyMcp({ agencyConfig = null, ghlConfig, logger }) {
         if (typeof a.title === 'string' && a.title) note.title = a.title.slice(0, 200);
         if (typeof a.pinned === 'boolean') note.pinned = a.pinned;
         const r = await call({ token, method: 'POST', path: `/contacts/${encodeURIComponent(a.contactId)}/notes`, body: note, version: ghlConfig.ghlVersion });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_list-users': {
+        const r = await call({ token, method: 'GET', path: '/users/', query: { locationId: ghlConfig.ghlLocationId }, version: ghlConfig.ghlVersion });
+        if (r.status === 200 && r.body && Array.isArray(r.body.users)) {
+          return [{ status: 200, users: r.body.users.map((u) => ({ id: u.id, name: u.name || [u.firstName, u.lastName].filter(Boolean).join(' '), email: u.email, role: u.roles && u.roles.role })) }, false];
+        }
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_create-invoice': {
+        if (a.confirmedByUser !== true) return [{ error: 'not_confirmed', message: 'No se creó nada. Enséñale al usuario el invoice completo y espera su sí explícito.' }, true];
+        if (typeof a.contactId !== 'string' || !ID.test(a.contactId)) return [{ error: 'contactId inválido' }, true];
+        if (typeof a.contactName !== 'string' || !a.contactName.trim()) return [{ error: 'contactName es obligatorio' }, true];
+        if (typeof a.contactEmail !== 'string' || !EMAIL.test(a.contactEmail)) return [{ error: 'contactEmail inválido' }, true];
+        if (typeof a.name !== 'string' || !a.name.trim()) return [{ error: 'name es obligatorio' }, true];
+        const currency = typeof a.currency === 'string' && /^[A-Za-z]{3}$/.test(a.currency) ? a.currency.toUpperCase() : 'USD';
+        if (!Array.isArray(a.items) || a.items.length === 0 || a.items.length > 50) return [{ error: 'items debe tener de 1 a 50 líneas' }, true];
+        const items = [];
+        for (const it of a.items) {
+          if (!it || typeof it.name !== 'string' || !it.name.trim()) return [{ error: 'cada línea necesita name' }, true];
+          if (typeof it.amount !== 'number' || !Number.isFinite(it.amount) || it.amount < 0) return [{ error: 'amount inválido en una línea' }, true];
+          if (typeof it.qty !== 'number' || !Number.isFinite(it.qty) || it.qty <= 0) return [{ error: 'qty inválido en una línea' }, true];
+          const item = { name: it.name, currency, amount: it.amount, qty: it.qty, type: 'one_time' };
+          if (typeof it.description === 'string' && it.description) item.description = it.description;
+          items.push(item);
+        }
+        const issueDate = a.issueDate === undefined ? todayPr() : a.issueDate;
+        if (!DATE.test(issueDate)) return [{ error: 'issueDate debe ser YYYY-MM-DD' }, true];
+        if (a.dueDate !== undefined && !DATE.test(a.dueDate)) return [{ error: 'dueDate debe ser YYYY-MM-DD' }, true];
+        // The invoice's business block comes from the Eximia sub-account itself.
+        const locR = await call({ token, method: 'GET', path: `/locations/${encodeURIComponent(ghlConfig.ghlLocationId)}`, version: ghlConfig.ghlVersion });
+        const l = (locR.status === 200 && locR.body && locR.body.location) || {};
+        const biz = l.business || {};
+        const businessDetails = { name: biz.name || l.name || 'Eximia' };
+        if (l.phone) businessDetails.phoneNo = l.phone;
+        if (biz.website || l.website) businessDetails.website = biz.website || l.website;
+        if (biz.logoUrl || l.logoUrl) businessDetails.logoUrl = biz.logoUrl || l.logoUrl;
+        const contactDetails = { id: a.contactId, name: a.contactName, email: a.contactEmail, phoneNo: typeof a.contactPhone === 'string' ? a.contactPhone : '' };
+        if (typeof a.companyName === 'string' && a.companyName) contactDetails.companyName = a.companyName;
+        const discountValue = typeof a.discountValue === 'number' && Number.isFinite(a.discountValue) && a.discountValue >= 0 ? a.discountValue : 0;
+        const invoice = {
+          ...loc(),
+          name: a.name,
+          title: typeof a.title === 'string' && a.title ? a.title : 'INVOICE',
+          currency,
+          items,
+          discount: { type: a.discountType === 'fixed' ? 'fixed' : 'percentage', value: discountValue },
+          businessDetails,
+          contactDetails,
+          issueDate,
+          sentTo: { email: [a.contactEmail], ...(contactDetails.phoneNo ? { phoneNo: [contactDetails.phoneNo] } : {}) },
+          liveMode: a.liveMode !== false,
+        };
+        if (a.dueDate) invoice.dueDate = a.dueDate;
+        if (typeof a.termsNotes === 'string' && a.termsNotes) invoice.termsNotes = a.termsNotes;
+        logger.warn({ msg: 'eximia_invoice_create' });
+        const r = await call({ token, method: 'POST', path: '/invoices/', body: invoice, version: WRITE_INVOICES_VERSION });
+        return [out(r), r.status >= 400];
+      }
+      case 'eximia_send-invoice': {
+        if (a.confirmedByUser !== true) return [{ error: 'not_confirmed', message: 'No se envió nada. Enséñale al usuario a quién va y el total, y espera su sí explícito.' }, true];
+        if (typeof a.invoiceId !== 'string' || !ID.test(a.invoiceId)) return [{ error: 'invoiceId inválido' }, true];
+        if (typeof a.userId !== 'string' || !ID.test(a.userId)) return [{ error: 'userId inválido (sácalo de eximia_list-users)' }, true];
+        const action = ['email', 'sms', 'sms_and_email', 'send_manually'].includes(a.action) ? a.action : 'email';
+        logger.warn({ msg: 'eximia_invoice_send', action });
+        const r = await call({ token, method: 'POST', path: `/invoices/${encodeURIComponent(a.invoiceId)}/send`, body: { ...loc(), userId: a.userId, action, liveMode: a.liveMode !== false }, version: WRITE_INVOICES_VERSION });
         return [out(r), r.status >= 400];
       }
       case 'eximia_cancel-invoice-schedule': {
