@@ -183,12 +183,17 @@ function oauthError(res, status, error, description, headers = {}) {
   return sendJson(res, status, body, { Pragma: 'no-cache', ...headers });
 }
 
+// Blocks a second submit of the consent form: a repeated "Autorizar" issues a second code, and clients
+// such as GoHighLevel then fail with "Code verifier expired or not found". Allowed by CSP hash.
+const CONSENT_SCRIPT = "document.querySelector('form').addEventListener('submit',function(e){if(this.dataset.sent){e.preventDefault();return;}this.dataset.sent='1';var b=this.querySelectorAll('button');setTimeout(function(){for(var i=0;i<b.length;i++)b[i].disabled=true;},0);});";
+const CONSENT_SCRIPT_HASH = `'sha256-${crypto.createHash('sha256').update(CONSENT_SCRIPT).digest('base64')}'`;
+
 function sendHtml(res, status, html, formTarget) {
   const formAction = ["'self'", formTarget].filter(Boolean).join(' ');
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
+    'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; script-src ${CONSENT_SCRIPT_HASH}; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
@@ -352,7 +357,7 @@ function createOAuth({ env = process.env, ghlConfig, logger, now = () => Date.no
 <form method="post" action="/oauth/authorize">${fields}
 <label for="pw">${config.source === 'admin_pin' ? 'PIN del panel /admin' : 'Contraseña del dueño'}</label><input id="pw" name="password" type="password" autocomplete="current-password" autofocus>
 ${problem ? `<p class="err">${escapeHtml(problem)}</p>` : ''}
-<div class="row"><button class="no" name="decision" value="deny" type="submit">Cancelar</button><button class="go" name="decision" value="allow" type="submit">Autorizar</button></div></form>`;
+<div class="row"><button class="no" name="decision" value="deny" type="submit">Cancelar</button><button class="go" name="decision" value="allow" type="submit">Autorizar</button></div></form><script>${CONSENT_SCRIPT}</script>`;
     sendHtml(res, problem ? 401 : 200, page('Autorizar acceso', inner), new URL(ar.redirectUri).origin);
   }
 
@@ -381,7 +386,7 @@ ${problem ? `<p class="err">${escapeHtml(problem)}</p>` : ''}
     }
     if (typeof body.password !== 'string' || !safeEqual(body.password, config.password)) {
       logger.warn({ msg: 'oauth_consent_rejected' });
-      return consentPage(res, ar, 'Contraseña incorrecta.');
+      return consentPage(res, ar, config.source === 'admin_pin' ? 'PIN incorrecto. Revisa el PIN del panel /admin e inténtalo de nuevo.' : 'Contraseña incorrecta. Inténtalo de nuevo.');
     }
     const exp = seconds() + CODE_TTL_S;
     const code = signer.sign('code', {

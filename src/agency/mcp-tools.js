@@ -624,6 +624,8 @@ function createAgencyMcp({ agencyConfig = null, ghlConfig, logger }) {
           const headers = buildUpstreamHeaders(req, ghlConfig, 'mcp');
           delete headers['transfer-encoding'];
           headers['content-length'] = raw.length;
+          // We parse and rewrite this body, so ask GHL for it uncompressed (clients like GoHighLevel send gzip/br).
+          headers['accept-encoding'] = 'identity';
           const up = await new Promise((resolve) => {
             const r = transport.request(
               { protocol: base.protocol, hostname: base.hostname.replace(/^\[|\]$/g, ''), port: base.port || undefined, method: 'POST', path: `/mcp${req.url}`, headers, timeout: ghlConfig.upstreamTimeoutMs },

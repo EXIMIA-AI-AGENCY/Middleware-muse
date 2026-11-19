@@ -64,6 +64,13 @@ async function fullFlow(url, { registerBody, password = PASSWORD } = {}) {
   const params = { response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: 'S256', state: 'st-123', resource: `${url}/mcp/` };
   const consent = await request(`${url}/oauth/authorize?${form(params)}`);
   assert.equal(consent.status, 200);
+  assert.match(consent.headers['content-security-policy'], /script-src 'sha256-/);
+  {
+    // The inline script must match the CSP hash, or the browser silently blocks it.
+    const script = consent.text.match(/<script>([\s\S]*?)<\/script>/)[1];
+    const hash = require('node:crypto').createHash('sha256').update(script).digest('base64');
+    assert.ok(consent.headers['content-security-policy'].includes(`'sha256-${hash}'`));
+  }
   const answer = await request(`${url}/oauth/authorize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

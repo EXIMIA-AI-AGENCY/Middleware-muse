@@ -302,3 +302,16 @@ test('Eximia create and send invoice: both need confirmedByUser; body built from
   assert.deepEqual(JSON.parse(ghl.requests.at(-1).body), { altId: LOC, altType: 'location', userId: 'user000001', action: 'email', liveMode: true });
   assert.equal(ghl.requests.at(-1).url, '/invoices/inv000002/send');
 });
+
+test('tools/list asks GHL for an uncompressed body even when the client accepts gzip/br', async (t) => {
+  const { url, ghl } = await setup(t);
+  const r = await request(`${url}/mcp/`, {
+    method: 'POST',
+    headers: authed({ 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Accept-Encoding': 'gzip, deflate, br' }),
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  assert.equal(r.status, 200);
+  assert.equal(ghl.requests.at(-1).headers['accept-encoding'], 'identity');
+  const line = r.text.split('\n').find((l) => l.startsWith('data:'));
+  assert.ok(JSON.parse(line.slice(5)).result.tools.length > 1);
+});
