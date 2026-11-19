@@ -278,6 +278,15 @@ function createOAuth({ env = process.env, ghlConfig, logger, now = () => Date.no
       return oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uris is required');
     }
     if (!uris.every((u) => allowedRedirect(u, config.redirectOrigins))) {
+      // Log only the origins (no path/query) so an operator can add them to MCP_OAUTH_REDIRECT_ORIGINS.
+      const rejected = uris.filter((u) => !allowedRedirect(u, config.redirectOrigins)).map((u) => {
+        try {
+          return new URL(u).origin;
+        } catch {
+          return 'invalid';
+        }
+      });
+      logger.warn({ msg: 'oauth_redirect_rejected', origins: rejected });
       return oauthError(res, 400, 'invalid_redirect_uri', 'redirect_uri not allowed by this server');
     }
     const name = typeof meta.client_name === 'string' ? meta.client_name.slice(0, 80) : 'Cliente MCP';
