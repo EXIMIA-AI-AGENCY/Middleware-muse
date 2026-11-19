@@ -240,10 +240,31 @@ function readBody(req) {
 
 /** Parses a JSON or SSE MCP response into its JSON-RPC message (the last data: line). */
 function parseMcpBody(text, contentType) {
-  if (/text\/event-stream/i.test(contentType || '')) {
-    let last = null;
-    for (const line of text.split(/\r?\n/)) if (line.startsWith('data:')) last = line.slice(5).trim();
-    return last ? JSON.parse(last) : null;
+  const sse = /text\/event-stream/i.test(contentType || '') || /^\s*(event|data|id):/m.test(text || '');
+  if (sse) {
+    // An SSE stream may hold several events, and one event may split its JSON over several data: lines.
+    // Return the last event that is a JSON-RPC response (has result or error).
+    const events = [];
+    let data = [];
+    for (const line of String(text).split(/\r?\n/)) {
+      if (line === '') {
+        if (data.length) events.push(data.join('\n'));
+        data = [];
+      } else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+    if (data.length) events.push(data.join('\n'));
+    let fallback = null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      let obj;
+      try {
+        obj = JSON.parse(events[i]);
+      } catch {
+        continue;
+      }
+      if (obj && (obj.result !== undefined || obj.error !== undefined)) return obj;
+      if (!fallback) fallback = obj;
+    }
+    return fallback;
   }
   return text ? JSON.parse(text) : null;
 }
@@ -630,7 +651,7 @@ function createAgencyMcp({ agencyConfig = null, ghlConfig, logger }) {
             return sendRpc(res, parsed, { sse: /text\/event-stream/i.test(up.type || ''), headers: keep });
           }
           if (up) {
-            logger.warn({ msg: 'mcp_tools_list_passthrough', status: up.status });
+            logger.warn({ msg: 'mcp_tools_list_passthrough', status: up.status, type: up.type, accept: String(req.headers.accept || ''), session: Boolean(req.headers['mcp-session-id']), body: String(up.text || '').slice(0, 400) });
             // GHL error or unexpected shape: relay what it said, unchanged.
             res.writeHead(up.status, { 'Content-Type': up.type || 'application/json', 'Cache-Control': 'no-store' });
             return res.end(up.text);
